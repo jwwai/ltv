@@ -1,0 +1,41 @@
+####################################################################
+# docker-compose.yml — MediaMTX relay + Cloudflare Tunnel
+#
+# Run with:  docker compose up -d
+#
+# This gets you an HTTPS HLS URL (via Cloudflare) with zero port
+# forwarding on your router — MediaMTX only needs to be reachable on
+# your local network by cloudflared, which makes an outbound
+# connection to Cloudflare. See README.md for the one-time tunnel
+# setup (cloudflared login + `tunnel create` + DNS route) before this
+# will resolve publicly.
+####################################################################
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      # Only exposed on localhost — cloudflared reaches it over the
+      # docker network, nothing needs to be open to the internet
+      # directly. Drop these entirely if you don't need local access
+      # for testing/debugging.
+      - "127.0.0.1:8888:8888"   # HLS
+      # - "127.0.0.1:1935:1935" # RTMP, only if you enabled rtmp: yes
+      # - "127.0.0.1:8890:8890/udp" # SRT, only if you enabled srt: yes
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mediamtx-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Paste the token from `cloudflared tunnel token <tunnel-name>`
+      # (see README.md step 3) — or mount ~/.cloudflared instead if
+      # you prefer the config-file approach.
+      - TUNNEL_TOKEN=paste-your-tunnel-token-here
+    depends_on:
+      - mediamtx

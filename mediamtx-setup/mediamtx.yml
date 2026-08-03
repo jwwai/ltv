@@ -1,0 +1,153 @@
+####################################################################
+# MediaMTX config — RTSP / RTMP / UDP / SRT -> HLS relay
+#
+# Purpose: convert protocols the browser can never play (RTSP, RTMP,
+# UDP/RTP multicast, SRT) into HLS, which your existing web app already
+# knows how to play via hls.js. Each "path" below becomes an HLS URL at:
+#
+#   http://<this-server>:8888/<path-name>/index.m3u8
+#
+# Put that URL straight into your M3U as the channel's stream — no
+# changes needed in index.html or the Worker, it's just another HLS
+# channel to them.
+#
+# Full reference: https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
+####################################################################
+
+###############################
+# Global settings
+###############################
+
+logLevel: info
+logDestinations: [stdout]
+
+# API for health checks / scripting (optional, off by default for safety)
+api: no
+
+###############################
+# HLS output (what the browser actually fetches)
+###############################
+
+hls: yes
+hlsAddress: :8888
+
+# "always" keeps the HLS stream running (and buffering) even with no
+# viewers, so the first person to tune in doesn't wait for it to spin
+# up — matters for live TV where every second counts. Costs a bit of
+# idle CPU/bandwidth per always-on channel, so only do this for
+# channels you actually want instant-join on.
+hlsAlwaysRemux: no
+
+# Low-latency HLS (LL-HLS). Most browsers + hls.js support it, and it
+# meaningfully cuts glass-to-glass delay vs plain HLS. If a specific
+# player misbehaves with it, set this to "no" and fall back to
+# standard segmented HLS.
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+
+# CORS — required for the browser (on your GitHub Pages origin, or via
+# your Worker) to be allowed to fetch these segments directly.
+hlsAllowOrigin: "*"
+
+# Disable the other output protocols unless you specifically want them;
+# keeps the container's exposed surface (and open ports) minimal.
+rtsp: no
+rtmp: no
+webrtc: no
+srt: no
+
+###############################
+# Authentication
+###############################
+# Per-path credentials for anyone PUSHING a stream in (RTMP/SRT publish)
+# or, optionally, for viewers reading the HLS output. Leave a path's
+# publishUser/publishPass unset if you're only ever pulling FROM a
+# source (the common case below) rather than receiving a push.
+#
+# For read-side (viewer) auth on HLS, uncomment authInternalUsers below
+# and reference a user in the relevant path's "source" is not how read
+# auth works — read auth is global via authInternalUsers + each path's
+# permissions. See https://github.com/bluenviron/mediamtx#authentication
+# for the full model if you need per-channel viewer restrictions.
+
+# authInternalUsers:
+#   - user: viewer
+#     pass: change-me
+#     ips: []
+#     permissions:
+#       - action: read
+#         path: ~^.*$
+
+###############################
+# Paths — one entry per channel
+###############################
+paths:
+
+  # --- Pulling FROM an RTSP camera / IPTV RTSP source ---
+  # This is the most common case: some IPTV/CCTV sources hand you a
+  # straight rtsp:// URL. MediaMTX connects out to it and republishes.
+  hallway-cam:
+    source: rtsp://192.168.1.50:554/stream1
+    sourceProtocol: automatic     # tries TCP then UDP
+    sourceOnDemand: no            # keep it connected even with 0 HLS viewers
+
+  # --- Pulling FROM an RTSP source that needs credentials ---
+  gate-cam:
+    source: rtsp://admin:changeme@192.168.1.51:554/Streaming/Channels/101
+
+  # --- Receiving an RTMP PUSH (e.g. OBS, or an encoder box that only
+  #     speaks RTMP outbound) ---
+  # The encoder pushes TO this server at:
+  #   rtmp://<this-server>:1935/live-feed
+  # Enable rtmp: yes above if you use this.
+  live-feed:
+    source: publisher
+
+  # --- UDP / RTP multicast (common for IPTV delivered over a managed
+  #     ISP network, e.g. multicast TV feeds on a local LAN) ---
+  news-multicast:
+    source: udp://239.1.1.1:1234
+
+  # --- SRT source (increasingly common for contribution feeds) ---
+  # Enable srt: yes above if you use this.
+  remote-srt-feed:
+    source: srt://encoder.example.com:8890?streamid=publish:remote-srt-feed
+
+  # --- Pulling an already-HLS or already-RTSP feed just to normalize/
+  #     relay it (e.g. to add auth, or route it through one consistent
+  #     egress IP) ---
+  relayed-channel:
+    source: rtsp://some-upstream.example.com:554/channel1
+
+  # --- Pulling an existing HLS stream that's blocked for cloud/datacenter
+  #     IPs specifically (e.g. Pluto TV's ad-stitching CDN behind
+  #     jmp2.uk-style redirect links) ---
+  # This is a DIFFERENT situation from every entry above. Those just need
+  # *some* always-on relay — any server works. This one needs the relay
+  # to run from an actual residential IP, because the block is IP-
+  # reputation based: the target CDN checks whether the request is coming
+  # from a recognized datacenter/cloud range and rejects it before even
+  # looking at headers. A VPS, another Worker, or any other cloud host
+  # hits the exact same wall — confirmed directly: a fetch to this URL
+  # from an entirely separate cloud network returned an explicit
+  # "blocked — bot detection" response. Only a genuine home connection
+  # (this Pi, a spare PC on your home WiFi, etc.) gets past it, the same
+  # way VLC running on your own machine already does.
+  #
+  # source is just the plain https:// .m3u8 URL — MediaMTX pulls it like
+  # any other HLS source and re-serves it as normal.
+  00s-replay:
+    source: https://jmp2.uk/plu-62ba60f059624e000781c436.m3u8
+    sourceOnDemand: no   # keep it warm so switching to the channel is instant
+
+  # Repeat the same pattern for any other channel hitting this exact
+  # failure signature (works in VLC, fails identically on every proxy
+  # route in the app) — just swap in that channel's own jmp2.uk/similar
+  # URL and give the path a unique name.
+  # 70s-cinema:
+  #   source: https://jmp2.uk/plu-5f4d878d3d19b30007d2e782.m3u8
+  # 80s-rewind:
+  #   source: https://jmp2.uk/plu-5ca525b650be2571e3943c63.m3u8
