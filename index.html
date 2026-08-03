@@ -1,0 +1,2884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live TV — Channels</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://iptv-org.github.io">
+<!-- Proxy fallbacks get hit on every route-cascade past "direct" — warming
+     up their DNS/TLS handshake ahead of time shaves real latency off the
+     exact moment that matters most (a channel already failing route 0). -->
+<link rel="preconnect" href="https://api.codetabs.com">
+<link rel="preconnect" href="https://api.allorigins.win">
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js" defer></script>
+<script>
+  // The Cast SDK calls this by name once it's ready — has to be a real
+  // global (not something inside the app's own IIFE below), and has to
+  // exist before the SDK script itself finishes loading, which is why
+  // it's declared here rather than deferred with everything else.
+  window.__onGCastApiAvailable = function(isAvailable){
+    window.__castApiAvailable = !!isAvailable;
+  };
+</script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js" defer></script>
+<style>
+  :root{
+    --bg:#08090d;
+    --bg-panel:#12151b;
+    --bg-elevated:#1b1f27;
+    --bg-bubble:#1d2129;
+    --border:#242a34;
+    --border-soft:#1a1f28;
+    --accent:#34d399;
+    --accent-dim:#1f6b4f;
+    --accent-soft:rgba(52,211,153,.14);
+    --gold:#e8b458;
+    --text:#f2f4f7;
+    --text-dim:#8b93a1;
+    --text-faint:#565d6b;
+    --danger:#f97066;
+    --radius:14px;
+    --card-shadow:0 18px 40px -22px rgba(0,0,0,.65), 0 1px 0 rgba(255,255,255,.02) inset;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;overscroll-behavior-y:contain;}
+  /* Without this, scrolling/bouncing past the top of the page on a phone
+     triggers the browser's native pull-to-refresh — a browser/OS-level
+     gesture, not app behavior, which is exactly why it happens
+     identically across every browser on the same device (iPhone browsers
+     are all WebKit under the hood) and starts immediately on load, before
+     any script has had a chance to do anything wrong. contain (rather
+     than none) still lets an inner scroll container bounce normally;
+     it only stops that bounce from propagating up into a page reload. */
+  body{
+    background:
+      radial-gradient(ellipse 1000px 560px at 12% -12%, rgba(52,211,153,.09), transparent 58%),
+      radial-gradient(ellipse 800px 520px at 105% -5%, rgba(90,120,255,.06), transparent 55%),
+      radial-gradient(ellipse 700px 460px at 50% 115%, rgba(232,180,88,.04), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font-family:'Inter',system-ui,sans-serif;
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+  }
+  .shell{max-width:1180px;margin:0 auto;padding:26px 20px 56px;}
+
+  /* ---------- Header ---------- */
+  .wordmark{
+    display:flex;align-items:baseline;justify-content:space-between;
+    margin-bottom:22px;flex-wrap:wrap;gap:8px;
+    position:relative; /* anchors the source-picker popover below */
+  }
+  .wordmark .brand{
+    font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:23px;
+    letter-spacing:.2px;display:flex;align-items:center;gap:10px;
+  }
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 4px var(--accent-soft), 0 0 14px rgba(52,211,153,.5);flex:none;}
+  .wordmark .meta{font-size:12.5px;color:var(--text-faint);font-variant-numeric:tabular-nums;}
+  .wordmark .meta b{color:var(--text-dim);font-weight:600;}
+  .meta-note{color:var(--text-faint);}
+
+  .source-btn{width:26px;height:26px;opacity:.6;}
+  .source-btn svg{width:15px;height:15px;}
+  .source-btn:hover, .source-btn.is-open{opacity:1;background:rgba(255,255,255,.1);}
+  .now-playing{
+    font-family:'Inter',sans-serif;font-weight:500;font-size:14px;
+    color:var(--text-faint);letter-spacing:0;margin-left:2px;
+  }
+  .now-playing:not(:empty)::before{content:'·';margin-right:10px;opacity:.5;}
+  .source-panel{
+    position:absolute;top:calc(100% + 8px);left:0;z-index:20;
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);
+    padding:14px;box-shadow:var(--card-shadow);width:300px;
+    display:flex;flex-direction:column;gap:8px;
+  }
+  .source-panel-label{font-size:11.5px;color:var(--text-faint);font-weight:600;text-transform:uppercase;letter-spacing:.4px;}
+  .source-panel select, .source-panel input{
+    background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;
+    color:var(--text);font:inherit;font-size:13px;padding:8px 10px;width:100%;
+  }
+  .source-panel-actions{display:flex;align-items:center;gap:10px;margin-top:2px;}
+  .source-panel-actions .reset-btn{width:auto;height:32px;padding:0 16px;border-radius:8px;font-size:12.5px;}
+  .source-panel-note{font-size:11.5px;color:var(--text-faint);flex:1;}
+
+  /* ---------- Top row: player + sidebar (search/filters/guide) ----------
+     Deliberately NOT stretched to match the player's height (align-self:
+     flex-start) — that dependency was exactly why the guide box kept
+     changing size: it relied on flex-fill from a height that isn't always
+     resolved the same way across browsers. The guide box below has its
+     own fixed height instead, independent of the player entirely. */
+  .top-row{display:flex;gap:22px;margin-bottom:18px;}
+  .side-col{
+    flex:0 0 340px;width:340px;min-width:0;align-self:flex-start;
+    display:flex;flex-direction:column;gap:10px;
+  }
+  .guide-toggle{
+    display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);
+    cursor:pointer;user-select:none;flex:none;padding:0 4px;
+  }
+  .guide-toggle input{accent-color:var(--accent);cursor:pointer;width:14px;height:14px;}
+
+  .filter-row{display:flex;gap:10px;align-items:center;}
+  .filter-row .field{flex:1;min-width:0;}
+  /* Row 2 has 3 items (language + reset + toggle) instead of 2, so a plain
+     flex:1 language field would stretch to swallow most of the row —
+     pin it to the exact width Country/Category compute to in their own
+     2-item row instead. */
+  .filter-row .lang-field{flex:0 0 calc(50% - 5px);}
+
+  .field{position:relative;}
+  .field select, .field input{
+    width:100%;appearance:none;-webkit-appearance:none;
+    background:var(--bg-elevated);color:var(--text);
+    border:1px solid var(--border);border-radius:10px;
+    padding:10px 30px 10px 12px;font-size:13.5px;font-family:inherit;font-weight:500;
+    cursor:pointer;transition:border-color .15s, background .15s;
+  }
+  .field input{cursor:text;padding-left:32px;}
+  .field input::placeholder{color:var(--text-faint);}
+  .field select:hover, .field input:hover{border-color:#333a46;}
+  .field select:focus, .field input:focus{outline:none;border-color:var(--accent);background:#1c2129;}
+  .field.select::after{
+    content:"";position:absolute;right:12px;top:50%;transform:translateY(-65%);
+    width:7px;height:7px;border-right:1.6px solid var(--text-dim);border-bottom:1.6px solid var(--text-dim);
+    transform-origin:center;transform:translateY(-65%) rotate(45deg);pointer-events:none;
+  }
+  .field.search svg{
+    position:absolute;left:10px;top:50%;transform:translateY(-50%);
+    width:14px;height:14px;stroke:var(--text-faint);pointer-events:none;
+  }
+  .reset-btn{
+    flex:none;width:38px;height:38px;border-radius:10px;
+    background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-dim);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+    transition:border-color .15s, color .15s, transform .35s ease;
+  }
+  .reset-btn:hover{border-color:var(--accent);color:var(--accent);}
+  .reset-btn:active svg{transform:rotate(-70deg);}
+  .reset-btn svg{width:16px;height:16px;transition:transform .35s ease;}
+
+  /* ---------- Player ---------- */
+  .player-frame{
+    position:relative;background:#000;border-radius:18px;overflow:hidden;
+    border:1px solid var(--border);
+    box-shadow:0 30px 60px -25px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02) inset;
+    aspect-ratio:16/9;
+    flex:1;min-width:0;align-self:flex-start;
+    transition:box-shadow .4s ease, border-color .4s ease;
+  }
+  .player-frame.is-live{
+    border-color:var(--accent-dim);
+    box-shadow:0 30px 60px -25px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02) inset, 0 0 0 1px var(--accent-soft), 0 0 34px -12px rgba(52,211,153,.28);
+  }
+  video{width:100%;height:100%;object-fit:contain;background:#000;display:block;}
+
+  .player-empty{
+    position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;color:var(--text-faint);text-align:center;padding:20px;
+  }
+  .player-empty .glyph{
+    width:56px;height:56px;border-radius:50%;border:1.5px solid var(--border);
+    display:flex;align-items:center;justify-content:center;color:var(--text-dim);
+  }
+  .player-empty .t1{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;color:var(--text-dim);}
+  .player-empty .t2{font-size:12.5px;max-width:280px;line-height:1.5;}
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  .toast{
+    position:absolute;top:14px;right:16px;z-index:5;
+    background:rgba(20,10,10,.7);backdrop-filter:blur(6px);border:1px solid rgba(249,112,102,.3);
+    color:#ffd9d5;font-size:12px;font-weight:500;padding:8px 12px;border-radius:10px;
+    max-width:260px;opacity:0;transform:translateY(-6px);transition:opacity .25s, transform .25s;
+    pointer-events:none;
+  }
+  .toast.show{opacity:1;transform:translateY(0);}
+
+  .controls{
+    position:absolute;left:0;right:0;bottom:0;z-index:4;
+    display:flex;align-items:center;gap:14px;padding:10px 16px 12px;
+    background:linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,0));
+    opacity:0;transform:translateY(8px);pointer-events:none;
+    transition:opacity .2s ease, transform .2s ease;
+  }
+  .player-frame:hover .controls,
+  .player-frame:focus-within .controls,
+  .player-frame.force-controls .controls{
+    opacity:1;transform:translateY(0);pointer-events:auto;
+  }
+  .icon-btn{
+    background:none;border:none;color:#eef1f5;cursor:pointer;display:flex;
+    align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;
+    opacity:.9;transition:opacity .15s, background .15s, transform .1s;
+    flex:none;
+  }
+  .icon-btn:hover{opacity:1;background:rgba(255,255,255,.1);}
+  .icon-btn:active{transform:scale(.92);}
+  .icon-btn svg{width:17px;height:17px;}
+  .icon-btn.is-muted{color:var(--danger);opacity:1;}
+  .round-btn{border:1.4px solid rgba(255,255,255,.55);border-radius:50%;}
+  .round-btn svg{width:13px;height:13px;}
+
+  .vol-group{display:flex;align-items:center;gap:8px;}
+  .vol-slider{
+    -webkit-appearance:none;appearance:none;width:80px;height:3px;border-radius:3px;
+    background:rgba(255,255,255,.28);cursor:pointer;
+  }
+  .vol-slider::-webkit-slider-thumb{
+    -webkit-appearance:none;width:11px;height:11px;border-radius:50%;background:#fff;
+    box-shadow:0 0 0 1px rgba(0,0,0,.2);
+  }
+  .vol-slider.is-muted::-webkit-slider-thumb{background:var(--danger);}
+  .controls .spacer{flex:1;}
+  .right-controls{display:flex;align-items:center;gap:8px;}
+
+  /* ---------- Channel rail ---------- */
+  .rail-head{
+    display:flex;align-items:baseline;justify-content:space-between;margin:22px 2px 10px;
+  }
+  .rail-head h2{
+    font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;margin:0;
+    color:var(--text);display:flex;align-items:center;gap:8px;
+  }
+  .rail-head h2 .count{color:var(--text-faint);font-weight:500;font-size:12.5px;}
+  .rail-head-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap;}
+  .check-status{font-size:11.5px;color:var(--text-faint);}
+  .working-toggle{
+    display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);
+    cursor:pointer;user-select:none;
+  }
+  .working-toggle input{accent-color:var(--accent);cursor:pointer;width:14px;height:14px;}
+  .check-btn{
+    display:flex;align-items:center;gap:6px;flex:none;
+    background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-dim);
+    padding:7px 13px;border-radius:100px;font-size:12.5px;font-weight:600;cursor:pointer;
+    transition:border-color .15s, color .15s;
+  }
+  .check-btn:hover{border-color:var(--accent);color:var(--accent);}
+  .check-btn.running{color:var(--gold);border-color:var(--gold);}
+  .check-btn svg{width:14px;height:14px;flex:none;}
+  .check-btn.running svg{animation:spin 1.1s linear infinite;}
+
+  .rail-wrap{position:relative;}
+  .rail{
+    display:flex;align-items:center;gap:20px;overflow-x:auto;overflow-y:visible;
+    padding:18px 64px 22px;scroll-behavior:smooth;cursor:grab;
+    scrollbar-width:thin;scrollbar-color:#2a2f3a transparent;
+    overscroll-behavior:contain;
+  }
+  .rail.dragging{cursor:grabbing;scroll-behavior:auto;user-select:none;}
+  .rail::-webkit-scrollbar{height:6px;}
+  .rail::-webkit-scrollbar-thumb{background:#242a34;border-radius:6px;}
+  .rail::-webkit-scrollbar-track{background:transparent;}
+
+  .bubble{
+    flex:none;width:78px;display:flex;flex-direction:column;align-items:center;gap:8px;
+    position:relative;transition:transform .18s cubic-bezier(.2,.8,.3,1.3);
+    transform-origin:center bottom;will-change:transform;
+    content-visibility:auto;contain-intrinsic-size:78px 104px;
+  }
+  .bubble .ring{
+    width:64px;height:64px;border-radius:50%;background:var(--bg-bubble);
+    border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;
+    cursor:pointer;position:relative;
+    transition:border-color .18s, box-shadow .18s, background .18s;
+  }
+  .bubble .ring-clip{
+    width:100%;height:100%;border-radius:50%;overflow:hidden;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .bubble .ring img{width:72%;height:72%;object-fit:contain;pointer-events:none;}
+  .bubble .ring .fallback{
+    font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:16px;color:var(--text-dim);
+  }
+  .bubble .status-dot{
+    position:absolute;bottom:-1px;right:-1px;width:12px;height:12px;border-radius:50%;
+    border:2px solid var(--bg);display:none;z-index:2;
+  }
+  .bubble.check-ok .status-dot{display:block;background:var(--accent);}
+  .bubble.check-fail .status-dot{display:block;background:var(--danger);}
+  .bubble.check-fail .ring{opacity:.45;}
+  .bubble.check-fail .name{opacity:.55;}
+  .bubble .vlc-badge{
+    position:absolute;top:0;right:2px;z-index:1;
+    background:var(--bg-elevated);border:1px solid #a8792f;color:#e0a94a;
+    font-size:8px;font-weight:800;letter-spacing:.3px;line-height:1;padding:3px 4px;border-radius:20px;
+  }
+  .bubble .chnum{
+    position:absolute;top:0;left:2px;z-index:1;
+    background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-faint);
+    font-size:9px;font-weight:700;line-height:1;padding:3px 5px;border-radius:20px;
+    font-variant-numeric:tabular-nums;
+  }
+  .bubble.active .chnum{border-color:var(--accent);color:var(--accent);}
+  .bubble:hover .ring, .bubble.active .ring{
+    border-color:var(--accent);box-shadow:0 0 0 5px var(--accent-soft), 0 10px 22px -8px rgba(0,0,0,.6);
+    background:#20272220;
+  }
+  .bubble.active .ring{background:#16241d;}
+  .bubble .name{
+    font-size:11px;color:var(--text-dim);text-align:center;line-height:1.25;
+    max-width:76px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
+    -webkit-line-clamp:2;-webkit-box-orient:vertical;
+    transition:color .15s;
+  }
+  .bubble:hover .name, .bubble.active .name{color:var(--text);}
+  .bubble.active .name{color:var(--accent);font-weight:600;}
+
+  .rail-edge{
+    position:absolute;top:0;bottom:0;width:56px;pointer-events:none;z-index:2;
+  }
+  .rail-edge.l{left:0;background:linear-gradient(to right, var(--bg) 10%, transparent);}
+  .rail-edge.r{right:0;background:linear-gradient(to left, var(--bg) 10%, transparent);}
+
+  .rail-empty, .rail-loading{
+    padding:30px 10px;color:var(--text-faint);font-size:13px;text-align:center;width:100%;
+  }
+  .spinner{
+    width:16px;height:16px;border-radius:50%;border:2px solid var(--border);
+    border-top-color:var(--accent);animation:spin .7s linear infinite;display:inline-block;
+    vertical-align:-3px;margin-right:8px;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .sentinel{flex:none;width:1px;}
+
+  /* ---------- TV Guide ---------- */
+
+  /* The card chrome lives on this outer wrapper, not the inner panels, so
+     swapping guide content <-> logo never double-boxes or shifts size.
+     Height is set by JS (syncGuideHeight) to match the player frame's
+     rendered height on desktop, so the two boxes bottom-align instead of
+     the sidebar running past or stopping short of the video. min-height
+     is a floor for very short players / before JS has run; the
+     max-height fallback only applies where JS opts out (mobile stack). */
+  .guide-or-logo{
+    flex:0 0 300px;min-height:180px;display:flex;flex-direction:column;
+    background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);
+    padding:15px;box-shadow:var(--card-shadow);overflow:hidden;
+  }
+  .guide-inner{flex:1;min-height:0;display:flex;flex-direction:column;}
+  .guide-head{
+    display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;flex:none;
+  }
+  .guide-head-right{display:flex;align-items:center;gap:10px;}
+  .guide-source-note{font-size:11px;color:var(--text-faint);}
+  .guide-clock{font-size:12px;color:var(--text-faint);font-variant-numeric:tabular-nums;}
+
+  .guide-panel{
+    flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+    scrollbar-width:thin;scrollbar-color:#2a2f3a transparent;
+    overscroll-behavior:contain;
+  }
+  .guide-panel::-webkit-scrollbar{width:6px;}
+  .guide-panel::-webkit-scrollbar-thumb{background:#242a34;border-radius:6px;}
+  .guide-panel::-webkit-scrollbar-track{background:transparent;}
+  .guide-empty{
+    display:flex;align-items:center;justify-content:center;
+    color:var(--text-faint);font-size:13px;padding:20px 10px;text-align:center;
+    height:100%;
+  }
+  .guide-try-btn{
+    background:none;border:none;padding:0;margin:0 0 0 4px;font:inherit;
+    color:var(--accent);text-decoration:underline;text-underline-offset:2px;cursor:pointer;
+  }
+  .guide-try-btn:hover{color:#5fe8b6;}
+
+  .logo-display{
+    flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:14px;text-align:center;
+  }
+  .logo-display img{max-width:72%;max-height:130px;object-fit:contain;}
+  .logo-display .logo-fallback{
+    width:88px;height:88px;border-radius:50%;background:var(--bg-bubble);
+    border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;
+    font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:26px;color:var(--text-dim);
+  }
+  .logo-display .logo-name{font-size:13px;font-weight:600;color:var(--text-dim);padding:0 10px;}
+  .logo-display .logo-empty{color:var(--text-faint);font-size:13px;padding:0 10px;}
+
+  .guide-now-label{
+    font-size:10.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;
+    color:var(--gold);margin-bottom:4px;
+  }
+  .guide-now-title{
+    font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:600;color:var(--text);
+    margin-bottom:3px;
+  }
+  .guide-now-time{font-size:12px;color:var(--text-dim);font-variant-numeric:tabular-nums;}
+  .guide-now-desc{
+    font-size:12.5px;color:var(--text-dim);line-height:1.5;margin-top:8px;
+    max-width:640px;
+  }
+  .guide-progress{
+    margin-top:12px;height:4px;border-radius:3px;background:var(--bg-elevated);overflow:hidden;
+  }
+  .guide-progress-fill{
+    height:100%;background:linear-gradient(90deg, #8a6a2e, var(--gold));
+    transition:width 1s linear;
+  }
+  .guide-upnext{
+    display:flex;gap:10px;overflow-x:auto;margin-top:16px;padding-top:14px;
+    border-top:1px solid var(--border-soft);
+    scrollbar-width:thin;scrollbar-color:#2a2f3a transparent;
+  }
+  .guide-card{
+    flex:none;min-width:150px;max-width:190px;background:var(--bg-elevated);
+    border:1px solid var(--border);border-radius:10px;padding:9px 11px;
+  }
+  .guide-card-time{font-size:10.5px;color:var(--text-faint);font-variant-numeric:tabular-nums;margin-bottom:3px;}
+  .guide-card-title{
+    font-size:12.5px;color:var(--text);font-weight:500;line-height:1.3;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  }
+
+  footer{
+    text-align:center;margin-top:30px;font-size:11.5px;color:var(--text-faint);line-height:1.7;
+  }
+  footer a{color:var(--text-dim);}
+
+  @media (max-width:960px){
+    /* Reorders to: header, video, channel rack, search/filters, guide,
+       footer — display:contents "unwraps" top-row so its two children
+       (player-frame and side-col) become directly reorderable alongside
+       rail-head/rail-wrap instead of being stuck adjacent to each other
+       as a pair. No DOM changes needed, just how the existing elements
+       are allowed to flow on a narrow screen. */
+    .shell{display:flex;flex-direction:column;}
+    .wordmark{order:0;}
+    .top-row{display:contents;}
+    .player-frame{order:1;}
+    .rail-head{order:2;}
+    .rail-wrap{order:3;}
+    .side-col{order:4;width:100%;flex:0 0 auto;}
+    footer{order:5;}
+    .guide-or-logo{flex:0 0 300px;max-height:300px;height:300px!important;}
+  }
+  @media (max-width:640px){
+    .filter-row{flex-direction:column;align-items:stretch;}
+    .filter-row .lang-field{flex:1 1 auto;}
+    .reset-btn{width:100%;height:38px;}
+    .vol-slider{width:50px;}
+    .controls{gap:8px;padding:8px 10px 10px;}
+    /* iOS Safari auto-zooms the whole page when focusing any input/select
+       with a font-size under 16px — its way of "helping" since it assumes
+       smaller text is too hard to read/type into. That zoom-and-then-
+       zoom-back-out on blur is exactly what looked like UI blocks
+       randomly enlarging when tapping search or a filter dropdown. 16px
+       is the threshold that turns this off; nothing else about how these
+       look needs to change. */
+    .field select, .field input, .source-panel select, .source-panel input{
+      font-size:16px;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="wordmark">
+    <div class="brand"><span class="dot"></span>Live TV
+      <button class="icon-btn source-btn" id="sourceBtn" title="Change channel source">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
+      </button>
+      <span class="now-playing" id="nowPlayingLabel"></span>
+    </div>
+    <div class="meta" id="metaLine"><b>Loading playlist…</b></div>
+    <div class="source-panel" id="sourcePanel" style="display:none;">
+      <label class="source-panel-label">Channel source</label>
+      <select id="sourcePreset">
+        <option value="custom">Custom URL…</option>
+      </select>
+      <input type="url" id="sourceCustomUrl" placeholder="https://example.com/playlist.m3u" style="display:none;">
+      <div class="source-panel-actions">
+        <button class="reset-btn" id="sourceLoadBtn">Load</button>
+        <span class="source-panel-note" id="sourcePanelNote"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="top-row">
+
+    <div class="player-frame" id="playerFrame">
+      <video id="video" playsinline muted></video>
+
+      <div class="player-empty" id="emptyState">
+        <div class="glyph">
+          <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><path d="M8 5v14l11-7-11-7z" fill="currentColor"/></svg>
+        </div>
+        <div class="t1">Pick a channel to start watching</div>
+        <div class="t2">Browse the dock below, or filter by country, category or language.</div>
+      </div>
+
+      <div class="toast" id="toast"></div>
+
+      <div class="controls" id="controls" style="display:none;">
+        <div class="vol-group">
+          <button class="icon-btn" id="muteBtn" title="Mute">
+            <svg id="volIcon" viewBox="0 0 24 24" fill="none"><path d="M4 9v6h4l5 5V4L8 9H4z" fill="currentColor"/><path d="M16 9a4 4 0 010 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M18.5 6.5a8 8 0 010 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+          <input class="vol-slider" id="volSlider" type="range" min="0" max="1" step="0.01" value="1">
+        </div>
+
+        <button class="icon-btn round-btn" id="prevBtn" title="Previous channel">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM19 5v14l-9-7 9-7z"/></svg>
+        </button>
+        <button class="icon-btn round-btn" id="nextBtn" title="Next channel">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM5 5v14l9-7-9-7z"/></svg>
+        </button>
+
+        <div class="spacer"></div>
+
+        <button class="icon-btn" id="castBtn" title="Cast to a nearby device">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V5a1 1 0 011-1h18a1 1 0 011 1v14a1 1 0 01-1 1h-7"/><path d="M2 13a9 9 0 018 8"/><path d="M2 17a5 5 0 014 4"/><circle cx="3" cy="21" r="1" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button class="icon-btn" id="vlcBtn" title="Copy the stream link to paste into VLC" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V4a2 2 0 012-2h10"/></svg>
+        </button>
+        <button class="icon-btn" id="resolveBtn" title="Resolve the real stream link (jmp2.uk-style redirect)" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.07 0l2.83-2.83a5 5 0 00-7.07-7.07L11.5 4.5"/><path d="M14 11a5 5 0 00-7.07 0L4.1 13.83a5 5 0 007.07 7.07L12.5 19.5"/></svg>
+        </button>
+        <div class="right-controls">
+          <button class="icon-btn" id="pipBtn" title="Picture in picture">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="14" rx="1.5"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button class="icon-btn" id="fsBtn" title="Fullscreen">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="side-col">
+      <div class="field search">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4.3-4.3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="searchInput" type="text" placeholder="Search channel">
+      </div>
+
+      <div class="filter-row">
+        <div class="field select">
+          <select id="countrySel"><option value="">Country</option></select>
+        </div>
+        <div class="field select">
+          <select id="categorySel"><option value="">Category</option></select>
+        </div>
+      </div>
+
+      <div class="filter-row">
+        <div class="field select lang-field">
+          <select id="languageSel"><option value="">Language</option></select>
+        </div>
+        <button class="reset-btn" id="resetFiltersBtn" title="Reset Country / Category / Language / Search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.64 6.36"/><path d="M3 21v-6h6"/></svg>
+        </button>
+        <label class="guide-toggle" id="guideToggleWrap">
+          <input type="checkbox" id="guideToggle"><span>TV Guide</span>
+        </label>
+      </div>
+
+      <div class="guide-or-logo">
+        <div class="guide-inner" id="guideInner" style="display:none;">
+          <div class="guide-head">
+            <span class="guide-source-note" id="guideSourceNote"></span>
+            <span class="guide-clock" id="guideClock"></span>
+          </div>
+          <div class="guide-panel" id="guidePanel">
+            <div class="guide-empty">Pick a channel to see what's playing — or <button class="guide-try-btn" id="tryExampleBtn">try France 24 as an example</button>.</div>
+          </div>
+        </div>
+        <div class="logo-display" id="logoDisplay">
+          <div class="logo-empty">Pick a channel to see its logo here</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="rail-head">
+    <h2>Channels <span class="count" id="railCount"></span></h2>
+    <div class="rail-head-actions">
+      <span class="check-status" id="checkStatus">scroll, drag, or hover an edge</span>
+      <label class="working-toggle" id="workingOnlyWrap" style="display:none;">
+        <input type="checkbox" id="workingOnlyToggle"><span>Only working</span>
+      </label>
+      <button class="check-btn" id="checkChannelsBtn" title="Test whether the channels currently shown actually stream — reachability only, nothing plays">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+        <span id="checkBtnLabel">Check channels</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="rail-wrap">
+    <div class="rail-edge l"></div>
+    <div class="rail-edge r"></div>
+    <div class="rail" id="rail">
+      <div class="rail-loading" id="railStatus"><span class="spinner"></span>Fetching channel list…</div>
+    </div>
+  </div>
+
+  <footer>
+    Streams sourced from the community-maintained <a href="https://github.com/iptv-org/iptv" target="_blank" rel="noopener">iptv-org</a> playlist,
+    guide data combined from <a href="https://epgshare01.online/" target="_blank" rel="noopener">epgshare01</a> and <a href="https://epg.pw/" target="_blank" rel="noopener">epg.pw</a>.
+    Availability of individual streams and guide coverage isn't guaranteed.
+  </footer>
+
+</div>
+
+<script defer>
+(function(){
+  const SOURCES = {
+    main:     ["https://iptv-org.github.io/iptv/index.m3u",          "https://cdn.jsdelivr.net/gh/iptv-org/iptv/index.m3u"],
+    country:  ["https://iptv-org.github.io/iptv/index.country.m3u",  "https://cdn.jsdelivr.net/gh/iptv-org/iptv/index.country.m3u"],
+    language: ["https://iptv-org.github.io/iptv/index.language.m3u", "https://cdn.jsdelivr.net/gh/iptv-org/iptv/index.language.m3u"]
+  };
+  // Selectable alternate/custom sources (see the source-picker button next
+  // to the "Live TV" title) now come from an editable CSV in this repo
+  // instead of being hardcoded here — add/remove/rename a row in
+  // Sourcelist.csv and it shows up in the picker on next load, no code
+  // change needed. Relative to index.html's own location, so it works
+  // regardless of the repo/subpath GitHub Pages serves this from.
+  const SOURCE_LIST_CSV_URL = 'Sourcelist.csv';
+  // Used only if Sourcelist.csv hasn't been uploaded yet / fails to load —
+  // keeps the app functional rather than stuck with an empty picker.
+  const SOURCE_LIST_FALLBACK = [
+    {name: 'Iptv', url: 'https://iptv-org.github.io/iptv/index.m3u'}
+  ];
+  const SOURCE_STORAGE_KEY = 'livetv_source_v2';
+  const BATCH = window.innerWidth <= 640 ? 24 : 48;
+  const DEFAULT_CHANNEL_NAME = 'Vevo Pop';
+
+  // Optional: your own streaming proxy (see cloudflare-worker-proxy.js in
+  // this repo). If set, it's tried before the shared public proxies below —
+  // those get rate-limited under real load, yours won't. Leave blank to
+  // skip straight to the public fallbacks.
+  //   MY_PROXY_URL = 'https://livetv-proxy.<your-subdomain>.workers.dev';
+  const MY_PROXY_URL = 'https://livetv-proxy.dr-navipani.workers.dev';
+  // Optional: a relay running on YOUR home connection (see
+  // home-relay-proxy.js in this repo), for the one category of channel
+  // no datacenter-hosted proxy can ever fix — jmp2.uk/Pluto-style links
+  // that reject any cloud/datacenter IP outright, confirmed directly
+  // earlier. Leave blank if you haven't set one up; those channels just
+  // fall back to the VLC/resolve-link handoff as before.
+  //   MY_HOME_RELAY_URL = 'https://your-tunnel-address.example.com';
+  const MY_HOME_RELAY_URL = '';
+  // Optional: an ffmpeg-relay.js instance (see that file in this repo),
+  // for the category NEITHER Worker NOR home-relay-proxy.js can ever
+  // touch — RTSP/RTMP/UDP sources. No browser has a networking API that
+  // speaks any of these protocols at all, with or without a proxy; only
+  // something that actually converts the protocol (ffmpeg) can make one
+  // playable here. Also usable for the jmp2.uk-style case if you'd
+  // rather run one relay instead of two. Leave blank if not set up.
+  //   MY_FFMPEG_RELAY_URL = 'https://your-ffmpeg-relay-tunnel.example.com';
+  const MY_FFMPEG_RELAY_URL = '';
+  // MY_PROXY_URL's origin isn't known until this line runs, so its
+  // preconnect hint (unlike cdnjs/jsdelivr/etc above) has to be added
+  // here rather than as a static <link> — it's the single most-used
+  // proxy route (tried before both public fallbacks), so warming up its
+  // connection is worth doing as early as possible.
+  if(MY_PROXY_URL){
+    const l = document.createElement('link');
+    l.rel = 'preconnect';
+    l.href = new URL(MY_PROXY_URL).origin;
+    document.head.appendChild(l);
+  }
+
+  let allChannels = [];
+  let filtered = [];
+  let renderedCount = 0;
+  let activeIndex = -1;
+  let activePlayingChannelId = null; // survives applyFilters() rebuilding `filtered` — activeIndex alone doesn't (see applyFilters)
+  let hls = null;
+  let mpegtsPlayer = null;
+
+  const el = id => document.getElementById(id);
+  const rail = el('rail');
+  const railStatus = el('railStatus');
+  const railCount = el('railCount');
+  const metaLine = el('metaLine');
+  const countrySel = el('countrySel');
+  const categorySel = el('categorySel');
+  const languageSel = el('languageSel');
+  const searchInput = el('searchInput');
+  const resetFiltersBtn = el('resetFiltersBtn');
+  const checkChannelsBtn = el('checkChannelsBtn');
+  const checkBtnLabel = el('checkBtnLabel');
+  const checkStatus = el('checkStatus');
+  const workingOnlyWrap = el('workingOnlyWrap');
+  const workingOnlyToggle = el('workingOnlyToggle');
+  const guideToggle = el('guideToggle');
+  const guideInner = el('guideInner');
+  const logoDisplay = el('logoDisplay');
+  const video = el('video');
+  const playerFrame = el('playerFrame');
+  const emptyState = el('emptyState');
+  const controls = el('controls');
+  const toastEl = el('toast');
+  const volSlider = el('volSlider');
+  const muteBtn = el('muteBtn');
+  const volIcon = el('volIcon');
+  const guidePanel = el('guidePanel');
+  const guideClock = el('guideClock');
+  const guideSourceNote = el('guideSourceNote');
+  const vlcBtn = el('vlcBtn');
+  const resolveBtn = el('resolveBtn');
+  const nowPlayingLabel = el('nowPlayingLabel');
+  const sourceBtn = el('sourceBtn');
+  const sourcePanel = el('sourcePanel');
+  const sourcePreset = el('sourcePreset');
+  const sourceCustomUrl = el('sourceCustomUrl');
+  const sourceLoadBtn = el('sourceLoadBtn');
+  const sourcePanelNote = el('sourcePanelNote');
+
+  function showToast(msg){
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(()=>toastEl.classList.remove('show'), 3200);
+  }
+
+  // ---------- TV Guide (real-time XMLTV programme data, multi-source) ----------
+  // Combines several public, regularly-refreshed XMLTV feeds so a channel has
+  // more chances of a match, keyed by the country code derived from its
+  // tvg-id (e.g. "CNN.us" -> US). Sources are merged; a channel id found in
+  // any of them is used, with earlier sources taking priority on conflicts.
+  const EPGPW_COUNTRIES = new Set(['AU','BR','CA','CN','DE','FR','GB','HK','ID','IN','JP','MY','NZ','PH','RU','SG','TW','US','VN','ZA']);
+
+  function sourcesForCountry(cc){
+    const list = [
+      {name:'epgshare01', url:`https://epgshare01.online/epgshare01/epg_ripper_${cc}1.xml.gz`, scoped:true}
+    ];
+    if(EPGPW_COUNTRIES.has(cc)) list.push({name:'epg.pw', url:`https://epg.pw/xmltv/epg_${cc}.xml.gz`, scoped:true});
+    // The global "lite" file covers every country's channels combined — safe
+    // for an exact id/name match (still that specific channel), but never
+    // for fuzzy matching (a partial name match against a global pool has no
+    // country awareness and can cross-match entirely unrelated channels —
+    // e.g. an Indian channel fuzzy-matching a Chinese one's programme data).
+    list.push({name:'epg.pw (global)', url:'https://epg.pw/xmltv/epg_lite.xml.gz', scoped:false});
+    return list;
+  }
+
+  const xmltvCache = new Map();      // fetch url -> Promise<Map<channelId, programme[]> | null>
+  const guideCache = new Map();      // country code -> Promise<{map, sources}>
+  let guideChannel = null;           // the channel the panel currently reflects
+  let guideList = null;              // its programme list, kept for periodic re-render
+  let guideRefreshTimer = null;
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  }
+  function fmtTime(d){
+    // Shown in the viewer's own local timezone so it lines up with their
+    // system clock and with when the program is actually airing for them.
+    return d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+  }
+  function parseXmltvTime(s){
+    // XMLTV format: YYYYMMDDHHMMSS [+-]ZZZZ. Handles both "+0530" and
+    // "+05:30" notations, and a bare "+05" with no minutes.
+    //
+    // Deliberately does NOT assume UTC when the offset is missing. The
+    // XMLTV spec allows omitting it, but in practice different providers
+    // disagree on what an un-offset time then means — some really do mean
+    // UTC, others emit their own server's local time with no indication
+    // at all. Guessing UTC for a source that actually meant e.g. UTC+8
+    // produces exactly a several-hours-off "now" — confidently wrong is
+    // worse than honestly missing, so an entry with no explicit offset is
+    // discarded here rather than trusted.
+    if(!s) return null;
+    const m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*(?:([+-]\d{2}):?(\d{2})?)?$/);
+    if(!m || !m[7]) return null;
+    const [,Y,Mo,D,H,Mi,S,tzh,tzm] = m;
+    const iso = `${Y}-${Mo}-${D}T${H}:${Mi}:${S}${tzh}:${tzm || '00'}`;
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function countryCodeFor(ch){
+    if(ch.tvgId){
+      const lastPart = ch.tvgId.split('.').pop();
+      const code = (lastPart || '').split('@')[0].split('(')[0].trim();
+      if(/^[A-Za-z]{2}$/.test(code)) return code.toUpperCase();
+    }
+    // Falls back to the country already resolved via tvg-country / the
+    // country-hydration pass. Previously this function ONLY looked at
+    // the tvg-id suffix and gave up otherwise — but plenty of channels
+    // have no tvg-id at all, or one that isn't formatted the way
+    // iptv-org's own list is (especially likely from a custom URL or an
+    // alternate source picked via the source picker), while still having
+    // a perfectly good country already known from the other path. This
+    // was a real, silent cause of "no guide available" for channels we
+    // actually had enough information for.
+    if(ch.country && /^[A-Za-z]{2}$/.test(ch.country)) return ch.country.toUpperCase();
+    return null;
+  }
+
+  // Guide providers invent their own channel ids independently of iptv-org's
+  // tvg-id scheme (e.g. iptv-org's "France24.fr@French" vs epgshare01's
+  // "France24French.fr") — so exact id matching mostly misses. Normalizing
+  // down to bare alphanumerics and comparing display names catches these.
+  // Quality/format qualifiers are stripped first so e.g. "Star Sports 1" and
+  // "Star Sports 1 HD" normalize to the exact same string — an EXACT match,
+  // not merely a fuzzy one, which is both more accurate and means the
+  // looser substring path below has to run (and can go wrong) less often.
+  function normalizeName(s){
+    return (s || '')
+      .replace(/\(.*?\)/g, '')                                     // strip "(1080p)" style suffixes
+      .replace(/\b(HD|SD|FHD|UHD|4K|HEVC|HQ|LQ|PLUS)\b/gi, '')     // strip common quality/format qualifiers
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .toLowerCase();
+  }
+
+  // Detects real gzip content by magic bytes rather than trusting the URL's
+  // extension — some servers set Content-Encoding: gzip, which makes the
+  // browser transparently decompress the body before we ever see it, so
+  // blindly inflating a ".gz" URL's bytes can throw on already-plain text.
+  function isGzip(buf){
+    return !!buf && buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+  }
+
+  // corsproxy.io now requires a paid API key for any non-localhost origin
+  // (their free tier is dev-only as of 2026), so it 403s on a real deployed
+  // site like GitHub Pages — codetabs.com is still free for production use.
+  const CORS_PROXY = u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`;
+
+  // Tries a direct fetch first, then falls back through your own Worker
+  // (if configured) and a couple of public CORS proxies. Your Worker goes
+  // first among the fallbacks: it streams bytes through untouched, while
+  // codetabs/allorigins relay content in ways that can corrupt genuinely
+  // binary data like a gzip-compressed .xml.gz — a real observed failure
+  // mode where the fetch itself "succeeds" but the bytes it hands back no
+  // longer inflate/parse as valid XML.
+  async function fetchRawBytes(url){
+    try{
+      const res = await fetch(url);
+      if(res.ok) return new Uint8Array(await res.arrayBuffer());
+    }catch(e){ /* fall through to proxies */ }
+
+    const proxies = [
+      ...(MY_PROXY_URL ? [u => `${MY_PROXY_URL}?url=${encodeURIComponent(u)}`] : []),
+      CORS_PROXY,
+      u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+    ];
+    for(const makeProxyUrl of proxies){
+      try{
+        const res = await fetch(makeProxyUrl(url));
+        if(res.ok) return new Uint8Array(await res.arrayBuffer());
+      }catch(e){ /* try next proxy */ }
+    }
+    return null;
+  }
+
+  // Fetches + parses a single XMLTV (optionally gzipped) feed into both a
+  // channelId -> sorted programme[] map and a normalizedName -> channelId
+  // index (from each <channel><display-name>). Cached per URL so a shared
+  // feed like the epg.pw global file is only ever downloaded once per session.
+  function fetchXmltvMap(url){
+    if(xmltvCache.has(url)) return xmltvCache.get(url);
+    const promise = (async ()=>{
+      try{
+        const buf = await fetchRawBytes(url);
+        if(!buf) throw new Error('no data retrieved');
+        const xmlText = isGzip(buf) ? pako.inflate(buf, {to:'string'}) : new TextDecoder('utf-8').decode(buf);
+        const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+        if(doc.querySelector('parsererror')) throw new Error('xml did not parse');
+
+        const map = new Map();
+        doc.querySelectorAll('programme').forEach(p=>{
+          const chId = p.getAttribute('channel');
+          const start = parseXmltvTime(p.getAttribute('start'));
+          const stop = parseXmltvTime(p.getAttribute('stop'));
+          if(!chId || !start || !stop || stop <= start) return;
+          const title = p.querySelector('title')?.textContent?.trim() || 'Untitled';
+          const desc = p.querySelector('desc')?.textContent?.trim() || '';
+          if(!map.has(chId)) map.set(chId, []);
+          map.get(chId).push({title, desc, start, stop});
+        });
+        map.forEach(list => list.sort((a,b)=> a.start - b.start));
+
+        const nameIndex = new Map();
+        doc.querySelectorAll('channel').forEach(c=>{
+          const id = c.getAttribute('id');
+          if(!id) return;
+          c.querySelectorAll('display-name').forEach(dn=>{
+            const norm = normalizeName(dn.textContent);
+            if(norm && !nameIndex.has(norm)) nameIndex.set(norm, id);
+          });
+        });
+
+        return {map, nameIndex};
+      }catch(e){
+        console.warn('guide fetch failed for', url, e);
+        return null;
+      }
+    })();
+    xmltvCache.set(url, promise);
+    return promise;
+  }
+
+  // Fetches every applicable source for a country in parallel and merges
+  // their programme maps and name indexes together.
+  const GUIDE_CACHE_MAX = 8; // parsed XMLTV data per country can be a few MB each — bounding this matters on memory-constrained mobile
+  async function loadGuideForCountry(cc){
+    if(guideCache.has(cc)) return guideCache.get(cc);
+    if(guideCache.size >= GUIDE_CACHE_MAX){
+      const oldest = guideCache.keys().next().value; // Map preserves insertion order — first key is the least-recently-added
+      guideCache.delete(oldest);
+    }
+    const promise = (async ()=>{
+      const sources = sourcesForCountry(cc);
+      const results = await Promise.all(sources.map(s => fetchXmltvMap(s.url)));
+      const merged = new Map();
+      const mergedNames = new Map();      // all sources — exact lookups only
+      const fuzzyNames = new Map();       // country-scoped sources only — safe for fuzzy matching
+      const usedSources = [];
+      results.forEach((r, i)=>{
+        if(!r || !r.map.size) return;
+        usedSources.push(sources[i].name);
+        r.map.forEach((list, chId)=>{ if(!merged.has(chId)) merged.set(chId, list); });
+        r.nameIndex.forEach((chId, norm)=>{
+          if(!mergedNames.has(norm)) mergedNames.set(norm, chId);
+          if(sources[i].scoped && !fuzzyNames.has(norm)) fuzzyNames.set(norm, chId);
+        });
+      });
+      return merged.size ? {map: merged, nameIndex: mergedNames, fuzzyNameIndex: fuzzyNames, sources: usedSources} : null;
+    })();
+    guideCache.set(cc, promise);
+    return promise;
+  }
+
+  // Looks up a channel's programme list by, in order: its exact tvg-id, its
+  // tvg-id with any "@Subdivision"/"@Quality" suffix stripped, an exact
+  // normalized display-name match (any source), then a fuzzy substring
+  // name match — restricted to country-scoped sources only, since a fuzzy
+  // match against the global multi-country pool has no way to tell a
+  // same-ish-named channel from a different country apart.
+  function findGuideList(ch, result){
+    const idCandidates = [ch.tvgId, (ch.tvgId || '').split('@')[0]].filter(Boolean);
+    for(const cand of idCandidates){
+      if(result.map.has(cand)) return result.map.get(cand);
+      const lower = cand.toLowerCase();
+      for(const [k, v] of result.map){ if(k.toLowerCase() === lower) return v; }
+    }
+
+    const target = normalizeName(ch.name);
+    if(!target) return null;
+
+    const directId = result.nameIndex.get(target);
+    if(directId && result.map.has(directId)) return result.map.get(directId);
+
+    if(target.length >= 3){
+      let bestId = null, bestScore = 0;
+      for(const [norm, id] of result.fuzzyNameIndex){
+        if(norm.length < 3) continue;
+        if(norm.includes(target) || target.includes(norm)){
+          const shorter = Math.min(norm.length, target.length);
+          const longer = Math.max(norm.length, target.length);
+          if(shorter / longer < 0.65) continue; // containment alone isn't enough — too loose a match to trust
+          const score = shorter;
+          if(score > bestScore){ bestScore = score; bestId = id; }
+        }
+      }
+      if(bestId && result.map.has(bestId)) return result.map.get(bestId);
+    }
+    return null;
+  }
+
+  function renderGuideLoading(){
+    guidePanel.innerHTML = '<div class="guide-empty"><span class="spinner"></span>Loading guide…</div>';
+  }
+  function renderGuideUnavailable(msg){
+    guidePanel.innerHTML = `<div class="guide-empty">${msg || "No programme data available for this channel yet."}</div>`;
+  }
+  function renderGuideList(list){
+    const now = new Date();
+    let idx = list.findIndex(p => p.start <= now && now < p.stop);
+    const current = idx !== -1 ? list[idx] : null;
+    const upcoming = list.filter(p => p.start > now).slice(0, 6);
+
+    let html = '';
+    if(current){
+      const pct = Math.min(100, Math.max(0, (now - current.start) / (current.stop - current.start) * 100));
+      html += `
+        <div class="guide-now">
+          <div class="guide-now-label">Now</div>
+          <div class="guide-now-title">${escapeHtml(current.title)}</div>
+          <div class="guide-now-time">${fmtTime(current.start)} – ${fmtTime(current.stop)}</div>
+          ${current.desc ? `<div class="guide-now-desc">${escapeHtml(current.desc)}</div>` : ''}
+          <div class="guide-progress"><div class="guide-progress-fill" style="width:${pct}%"></div></div>
+        </div>`;
+    } else {
+      html += '<div class="guide-empty">No programme currently airing for this channel.</div>';
+    }
+    if(upcoming.length){
+      html += '<div class="guide-upnext">' + upcoming.map(p => `
+        <div class="guide-card">
+          <div class="guide-card-time">${fmtTime(p.start)}</div>
+          <div class="guide-card-title">${escapeHtml(p.title)}</div>
+        </div>`).join('') + '</div>';
+    }
+    guidePanel.innerHTML = html;
+  }
+
+  async function showGuideFor(ch){
+    guideChannel = ch;
+    guideList = null;
+    clearInterval(guideRefreshTimer);
+    renderGuideLoading();
+    guideSourceNote.textContent = '';
+
+    const cc = countryCodeFor(ch);
+    if(!cc){ renderGuideUnavailable("Couldn't determine a guide source for this channel."); return; }
+
+    const result = await loadGuideForCountry(cc);
+    if(guideChannel !== ch) return; // channel changed while we were fetching
+    if(!result){
+      renderGuideUnavailable('Guide sources are unreachable right now (network or CORS restriction) — try again shortly.');
+      return;
+    }
+
+    let list = findGuideList(ch, result);
+    if(!list || !list.length){
+      guideSourceNote.textContent = `Checked ${result.sources.length} source${result.sources.length>1?'s':''}`;
+      renderGuideUnavailable('No programme data available for this channel yet.');
+      return;
+    }
+
+    guideList = list;
+    renderGuideList(list);
+    guideSourceNote.textContent = result.sources.length > 1
+      ? `Combined from ${result.sources.length} sources`
+      : `Source: ${result.sources[0]}`;
+    guideRefreshTimer = setInterval(()=>{ if(guideList) renderGuideList(guideList); }, 30000);
+  }
+
+  function tickGuideClock(){
+    guideClock.textContent = new Date().toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  }
+  tickGuideClock();
+  setInterval(tickGuideClock, 1000);
+
+  // ---------- M3U parsing ----------
+  // A handful of upstream playlist lines are malformed and leak a browser
+  // user-agent string (meant for #EXTVLCOPT) into the display name instead.
+  // Anything that looks like one gets treated as corrupt and dropped.
+  function looksLikeUserAgent(name){
+    return /mozilla\/|applewebkit|gecko\)|chrome\/\d|safari\/\d|like gecko/i.test(name);
+  }
+
+  // Fallback category inference for sources with no (or poor) group-title
+  // tagging — apsattv.com and similar minimalist aggregators are
+  // documented by independent reviewers as having "categories not well
+  // organized," so there's genuinely nothing to parse out of their own
+  // metadata in many cases. This is a heuristic guess from the channel
+  // NAME itself, not a substitute for real source data — it'll never be
+  // as accurate as a properly-tagged list, and only ever runs when
+  // group-title is truly absent (checked at the call site below), so a
+  // well-tagged source like iptv-org's own list is completely unaffected.
+  // Ordered roughly most-to-least distinctive to reduce false matches
+  // from a generic later keyword (e.g. "news" matching a channel that's
+  // actually named "Newsmax Kids" — unlikely in practice, but checking
+  // more specific categories first costs nothing and helps at the margin).
+  const CATEGORY_KEYWORDS = [
+    ['Kids', ['kids','cartoon','nickelodeon','nick jr','disney','boomerang','pbs kids','junior','toon']],
+    ['News', ['news','cnn','msnbc','newsmax','al jazeera','bloomberg','euronews','weather channel','oan']],
+    ['Sports', ['sport','espn','fox sports','nba','nfl','nhl','mlb','golf channel','tennis','motorsport','ufc tv','wwe','boxing','cricket','fifa','olympics','racing']],
+    ['Movies', ['movie','cinema','film4','hbo','showtime','starz','cinemax',' amc ','tcm']],
+    ['Documentary', ['discovery','documentary','history channel','nat geo','national geographic','animal planet','science channel']],
+    ['Music', ['music tv','mtv','vh1','vevo','hits radio','concert']],
+    ['Religious', ['faith','gospel','christian','catholic','tbn','ewtn']],
+    ['Shopping', ['shopping','qvc','hsn']],
+    ['Entertainment', ['comedy central','entertainment','lifetime','bravo',' e! ','tlc']],
+  ];
+  function inferCategoryFromName(name){
+    const lower = ` ${name.toLowerCase()} `;
+    for(const [category, keywords] of CATEGORY_KEYWORDS){
+      if(keywords.some(kw => lower.includes(kw))) return category;
+    }
+    return null;
+  }
+
+  async function parseM3U(text, fallbackCategory){
+    const out = [];
+    let cur = null;
+    // Scans the raw string in place with indexOf rather than
+    // text.split(/\r?\n/) up front — split() allocates a full array of
+    // every line (tens of thousands of strings for a playlist this size)
+    // that stays alive in memory for the entire parse, on top of the raw
+    // text AND the growing output array. On a memory-constrained phone,
+    // that peak — not just how long the parse takes — is plausibly
+    // enough on its own to trigger an OOM kill-and-reload, which yielding
+    // periodically (still done below) doesn't address by itself, since
+    // yielding only prevents the "unresponsive script" watchdog, not the
+    // underlying memory pressure.
+    const len = text.length;
+    let pos = 0;
+    let iter = 0;
+    const YIELD_EVERY = 2000;
+    while(pos < len){
+      let nl = text.indexOf('\n', pos);
+      if(nl === -1) nl = len;
+      let line = text.slice(pos, nl);
+      pos = nl + 1;
+      if(line.endsWith('\r')) line = line.slice(0, -1);
+      iter++;
+      if(iter % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+      line = line.trim();
+      if(!line) continue;
+      if(line.startsWith('#EXTINF')){
+        const attrs = {};
+        const attrRe = /([a-zA-Z0-9\-]+)="([^"]*)"/g;
+        let m, afterAttrs = 0;
+        while((m = attrRe.exec(line))){ attrs[m[1].toLowerCase()] = m[2]; afterAttrs = attrRe.lastIndex; }
+        // The display name follows the comma right after the last
+        // key="value" pair — searching from there avoids false splits on
+        // commas that appear inside a quoted attribute value.
+        const tail = line.slice(afterAttrs);
+        const commaIdx = tail.indexOf(',');
+        const name = commaIdx !== -1 ? tail.slice(commaIdx + 1).trim() : '';
+        cur = {
+          name: name || 'Unknown',
+          logo: attrs['tvg-logo'] || '',
+          tvgId: attrs['tvg-id'] || '',
+          country: (attrs['tvg-country'] || '').split(';')[0].trim(),
+          language: (attrs['tvg-language'] || '').split(';')[0].trim(),
+          // Some sources (apsattv.com and similar minimalist, native-
+          // app-oriented aggregators) provide no group-title at all — a
+          // generic "General" bucket for every single channel from such
+          // a source is useless for filtering. Tries a name-based guess
+          // first (e.g. "ESPN" -> Sports) since that's more specific and
+          // useful when it hits; falls back to the source's own name
+          // (still better than nothing) and only then to "General". Only
+          // ever runs when group-title is truly absent, so sources that
+          // DO provide it (iptv-org's own list) are unaffected.
+          category: attrs['group-title'] || inferCategoryFromName(name) || fallbackCategory || 'General',
+          url: ''
+        };
+      } else if(!line.startsWith('#')){
+        if(cur){
+          cur.url = line;
+          cur.id = out.length;
+          if(!looksLikeUserAgent(cur.name)) out.push(cur);
+          cur = null;
+        }
+      }
+    }
+    return out;
+  }
+
+  function uniqueSorted(arr){
+    return Array.from(new Set(arr.filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+  }
+
+  // Builds tvgId -> group-title (and name -> group-title as a fallback) maps
+  // from companion playlists like index.country.m3u / index.language.m3u,
+  // where every channel's category is swapped out for its country/language.
+  async function buildGroupMap(text){
+    const byId = new Map();
+    const byName = new Map();
+    let curId = '', curName = '', curGroup = '';
+    const len = text.length;
+    let pos = 0;
+    let iter = 0;
+    const YIELD_EVERY = 2000;
+    while(pos < len){
+      let nl = text.indexOf('\n', pos);
+      if(nl === -1) nl = len;
+      let line = text.slice(pos, nl);
+      pos = nl + 1;
+      if(line.endsWith('\r')) line = line.slice(0, -1);
+      iter++;
+      if(iter % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+      line = line.trim();
+      if(!line) continue;
+      if(line.startsWith('#EXTINF')){
+        const idMatch = line.match(/tvg-id="([^"]*)"/i);
+        const groupMatch = line.match(/group-title="([^"]*)"/i);
+        const nameMatch = line.match(/,(.*)$/);
+        curId = idMatch ? idMatch[1] : '';
+        curGroup = groupMatch ? groupMatch[1] : '';
+        curName = nameMatch ? nameMatch[1].trim() : '';
+      } else if(!line.startsWith('#')){
+        if(curId) byId.set(curId, curGroup);
+        if(curName) byName.set(curName, curGroup);
+        curId = ''; curName = ''; curGroup = '';
+      }
+    }
+    return {byId, byName};
+  }
+
+  async function fetchWithFallback(urls){
+    for(const url of urls){
+      // Direct first — works for any source with proper CORS (all of
+      // iptv-org's own hosting does). force-cache was dropped here: it
+      // tells the browser to reuse whatever's cached indefinitely without
+      // revalidating, which is a bad fit for a playlist that updates
+      // periodically, and can mean a previously-failed or stale response
+      // keeps getting served on reload even after the underlying source
+      // is fine again.
+      try{
+        const res = await fetch(url);
+        if(res.ok){
+          const text = await res.text();
+          if(text && text.includes('#EXTM3U')) return text;
+        }
+      }catch(e){ /* fall through to proxies below */ }
+
+      // Not every source in Sourcelist.csv is guaranteed to send CORS
+      // headers for direct browser fetch() — several of these (apsattv.com
+      // in particular) are built for native IPTV apps like Kodi/TiviMate,
+      // not browsers, so there was never a reason for their maintainer to
+      // add them. This was the one real gap versus fetchRawBytes (used for
+      // EPG data), which already had this same fallback — the channel
+      // list is more critical, not less, so it should have had it too.
+      const proxies = [
+        ...(MY_PROXY_URL ? [u => `${MY_PROXY_URL}?url=${encodeURIComponent(u)}`] : []),
+        CORS_PROXY,
+        u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+      ];
+      for(const makeProxyUrl of proxies){
+        try{
+          const res = await fetch(makeProxyUrl(url));
+          if(!res.ok) continue;
+          const text = await res.text();
+          if(text && text.includes('#EXTM3U')) return text;
+        }catch(e){ /* try next proxy */ }
+      }
+    }
+    return null;
+  }
+
+  function populateSelect(selectEl, values, placeholder, selectedValue){
+    selectEl.innerHTML = '';
+    const optAll = document.createElement('option');
+    optAll.value = '';
+    optAll.textContent = placeholder;
+    selectEl.appendChild(optAll);
+    values.forEach(v=>{
+      const o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      selectEl.appendChild(o);
+    });
+    if(selectedValue && values.includes(selectedValue)) selectEl.value = selectedValue;
+  }
+
+  async function loadPlaylist(urls, autoSelect, sourceName){
+    if(autoSelect === undefined) autoSelect = true;
+    const sourceUrls = urls || SOURCES.main;
+    // The main list is the only thing the dock/player actually need to
+    // render and start playing — fetch it alone first so the page becomes
+    // usable immediately, instead of blocking on the two slower companion
+    // playlists (which only feed the Country/Language dropdowns).
+    const mainText = await fetchWithFallback(sourceUrls);
+
+    if(!mainText){
+      railStatus.innerHTML = 'Could not load the channel list right now. The playlist host may be unreachable from this network — try refreshing.';
+      metaLine.innerHTML = '<b>Playlist unavailable</b>';
+      return;
+    }
+
+    allChannels = await parseM3U(mainText, sourceName);
+
+    // Browsers block "mixed content" — an insecure http:// stream loaded
+    // from a secure https:// page (like GitHub Pages) — outright, with no
+    // setting to allow it. Rather than hiding those channels, playChannel()
+    // routes them through an HTTPS proxy (see PLAYBACK_ROUTES / routedUrl
+    // below) so they still get a real shot at playing.
+    const pageIsSecure = window.location.protocol === 'https:';
+    const insecureCount = pageIsSecure ? allChannels.filter(c => /^http:\/\//i.test(c.url)).length : 0;
+
+    metaLine.innerHTML = `<b>${allChannels.length.toLocaleString()}</b> channels loaded`
+      + (insecureCount ? ` <span class="meta-note">· ${insecureCount.toLocaleString()} play via an HTTPS proxy (insecure source)</span>` : '');
+
+    populateSelect(countrySel, [], 'Country');
+    populateSelect(categorySel, uniqueSorted(allChannels.map(c=>c.category)), 'Category');
+    populateSelect(languageSel, [], 'Language');
+
+    applyFilters();
+    // Auto-playing/centering a default channel makes sense on first page
+    // load, but not after manually switching sources via the picker — the
+    // point there is to browse the new list starting from channel 1, not
+    // get immediately jumped to wherever "Vevo Pop" (or whatever matches)
+    // happens to land in it.
+    //
+    // On mobile specifically, skipped entirely rather than staggered —
+    // starting hls.js (manifest fetch, MediaSource setup, buffering,
+    // decoding) is real, separate cost on top of everything else that
+    // happens right at page open, and repeated reports of a reload a few
+    // seconds after opening — right in the window video playback would be
+    // ramping up — point at it directly. Letting the person tap a channel
+    // themselves once the page has actually settled removes that cost
+    // from the critical opening window entirely, rather than just
+    // shifting it a frame later.
+    if(autoSelect && window.innerWidth > 640){
+      selectDefaultChannel();
+    }
+
+    // Country/Language metadata isn't in the main file — it comes from two
+    // companion playlists. Deferred until the browser is idle (see
+    // runWhenIdle) rather than fired immediately: this is genuinely heavy
+    // work (two more full playlist fetches+parses, then a full pass over
+    // every loaded channel), and firing it right alongside the initial
+    // parse/render is exactly the kind of back-to-back CPU load a phone
+    // is most likely to choke on right at page load.
+    runWhenIdle(hydrateCountryAndLanguage);
+  }
+
+  async function hydrateCountryAndLanguage(){
+    const [countryText, languageText] = await Promise.all([
+      fetchWithFallback(SOURCES.country),
+      fetchWithFallback(SOURCES.language)
+    ]);
+    if(!countryText && !languageText) return;
+
+    const [countryMap, languageMap] = await Promise.all([
+      countryText ? buildGroupMap(countryText) : null,
+      languageText ? buildGroupMap(languageText) : null
+    ]);
+
+    const YIELD_EVERY = 1500;
+    for(let i=0;i<allChannels.length;i++){
+      if(i > 0 && i % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+      const ch = allChannels[i];
+      if(countryMap){
+        ch.country = (ch.tvgId && countryMap.byId.get(ch.tvgId)) || countryMap.byName.get(ch.name) || ch.country;
+      }
+      if(languageMap){
+        ch.language = (ch.tvgId && languageMap.byId.get(ch.tvgId)) || languageMap.byName.get(ch.name) || ch.language;
+      }
+    }
+
+    populateSelect(countrySel, uniqueSorted(allChannels.map(c=>c.country)), 'Country', countrySel.value);
+    populateSelect(languageSel, uniqueSorted(allChannels.map(c=>c.language)), 'Language', languageSel.value);
+  }
+
+  // Runs a task once the browser is actually idle, rather than immediately
+  // — used for hydrateCountryAndLanguage, which used to fire right
+  // alongside the initial parse/render and compete for the exact CPU time
+  // a phone needs most right at page load. requestIdleCallback isn't on
+  // very old Safari, hence the setTimeout fallback.
+  const runWhenIdle = window.requestIdleCallback || function(cb){ setTimeout(cb, 300); };
+
+  // Auto-plays a default channel as soon as the playlist is ready. Playback
+  // starts muted (the video element is muted from load) since browsers
+  // block unattended autoplay with sound — the person just needs to tap
+  // the volume icon to unmute.
+  function selectDefaultChannel(){
+    if(!filtered.length) return;
+    const target = normalizeName(DEFAULT_CHANNEL_NAME);
+    const idx = filtered.findIndex(c => normalizeName(c.name).includes(target));
+    if(idx === -1) return;
+    while(idx >= renderedCount && renderedCount < filtered.length) renderMore();
+    playChannel(idx);
+    showToast(`Playing ${DEFAULT_CHANNEL_NAME} — tap the volume icon to unmute.`);
+  }
+
+  // ---------- Filtering & rendering ----------
+  function applyFilters(){
+    const country = countrySel.value;
+    const category = categorySel.value;
+    const language = languageSel.value;
+    const q = searchInput.value.trim().toLowerCase();
+    const workingOnly = workingOnlyToggle.checked;
+
+    filtered = allChannels.filter(c=>{
+      if(country && c.country !== country) return false;
+      if(category && c.category !== category) return false;
+      if(language && c.language !== language) return false;
+      if(q && !c.name.toLowerCase().includes(q)) return false;
+      if(workingOnly && c.checked !== 'ok') return false;
+      return true;
+    });
+
+    
+    // activeIndex is just a position in `filtered` — rebuilding that array
+    // (any filter change, including Reset) leaves it pointing at whatever
+    // channel now happens to sit at the same numeric spot, not the one
+    // actually still playing. Re-locate the real playing channel by its
+    // stable id instead of trusting the old index; -1 (nothing
+    // highlighted/labeled) if it's been filtered out of view entirely —
+    // it's still playing, just not shown as "active" in a list it's no
+    // longer part of.
+    activeIndex = activePlayingChannelId != null
+      ? filtered.findIndex(c => c.id === activePlayingChannelId)
+      : -1;
+
+    renderedCount = 0;
+    rail.innerHTML = '';
+    rail.scrollLeft = 0; // always start from channel 1 on a fresh render — otherwise the browser can carry over the previous scroll position, landing mid-list instead
+    railCount.textContent = filtered.length ? `— ${filtered.length.toLocaleString()} found` : '';
+
+    if(filtered.length === 0){
+      rail.innerHTML = '<div class="rail-empty">No channels match these filters. Try clearing one.</div>';
+      return;
+    }
+    renderMore();
+  }
+
+  function bubbleNode(ch, idx){
+    const b = document.createElement('div');
+    b.className = 'bubble' + (ch.checked === 'ok' ? ' check-ok' : ch.checked === 'fail' ? ' check-fail' : '');
+    b.dataset.idx = idx;
+    const initials = ch.name.replace(/[^A-Za-z0-9]/g,'').slice(0,2).toUpperCase() || '?';
+    // Known-unplayable-in-browser channels (RTSP/RTMP/etc, or hosts like
+    // jmp2.uk confirmed to block cloud/proxy traffic) are flagged right
+    // on the bubble — this is a synchronous, no-network check, so it
+    // costs nothing to run for every rendered channel and saves someone
+    // clicking into a channel that's already a known dead end here.
+    const capability = streamCapability(ch.url);
+    const vlcOnly = !capability.playable;
+    b.innerHTML = `
+      <div class="chnum">${idx + 1}</div>
+      <div class="ring">
+        <div class="ring-clip">
+          ${ch.logo ? `<img data-src="${ch.logo}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+          <span class="fallback">${initials}</span>
+        </div>
+        ${vlcOnly ? `<span class="vlc-badge" title="${capability.reason} — tap to open in VLC">VLC</span>` : ''}
+        <span class="status-dot" title="${ch.checked === 'ok' ? (ch.checkReason || 'Reachable') : ch.checked === 'fail' ? (ch.checkReason || 'Not reachable') : ''}"></span>
+      </div>
+      <div class="name" title="${ch.name.replace(/"/g,'&quot;')}">${ch.name}</div>
+    `;
+    // hide fallback text once image loads
+    const img = b.querySelector('img');
+    const fb = b.querySelector('.fallback');
+    if(img){
+      fb.style.display = 'none';
+      img.addEventListener('error', ()=>{ fb.style.display = ''; });
+      img.addEventListener('load', ()=>{ if(img.naturalWidth>0){fb.style.display='none';} });
+      // native loading="lazy" is unreliable inside a custom horizontally-
+      // scrolling container on Safari (it's built for the main page
+      // scroll, not a nested overflow container) — with 13,000+ channels,
+      // if it silently doesn't defer here, every rendered logo decodes
+      // and stays in memory as you scroll, which is a very plausible
+      // cause of an iOS Safari OOM tab-kill on a long list like this
+      // (iPad's more permissive memory budget masks the same problem).
+      // A manually-controlled observer is reliable everywhere, AND lets
+      // us unload images that scroll far back out of view again instead
+      // of only deferring the first load — actively bounding memory
+      // rather than just delaying when it grows.
+      imgObserver.observe(img);
+    }
+    b.addEventListener('click', ()=> playChannel(idx));
+    return b;
+  }
+
+  // Single shared observer for every bubble's logo — loads on approach,
+  // unloads once it's scrolled well out of view. rootMargin gives a
+  // generous preload buffer so images are already there by the time they
+  // become visible, without the buffer being so large that most of the
+  // list stays loaded at once (which would defeat the point).
+  const imgObserver = new IntersectionObserver((entries)=>{
+    for(const entry of entries){
+      const img = entry.target;
+      if(entry.isIntersecting){
+        if(img.dataset.src && img.src !== img.dataset.src) img.src = img.dataset.src;
+      } else if(img.src){
+        img.removeAttribute('src'); // keeps data-src so it reloads if scrolled back into range
+      }
+    }
+  }, {root: rail, rootMargin: '400px'});
+
+  function renderMoreClean(){
+    const start = renderedCount;
+    const end = Math.min(filtered.length, start + BATCH);
+    for(let i=start; i<end; i++){
+      rail.appendChild(bubbleNode(filtered[i], i));
+    }
+    renderedCount = end;
+    if(renderedCount < filtered.length){
+      ensureSentinel();
+    } else {
+      removeSentinel();
+    }
+    markActiveBubble();
+  }
+  const renderMore = renderMoreClean;
+
+  let sentinelObserver = null;
+  function ensureSentinel(){
+    let s = rail.querySelector('.sentinel');
+    if(!s){
+      s = document.createElement('div');
+      s.className = 'sentinel';
+      rail.appendChild(s);
+      if(!sentinelObserver){
+        sentinelObserver = new IntersectionObserver((entries)=>{
+          entries.forEach(e=>{ if(e.isIntersecting) renderMore(); });
+        }, {root: rail, rootMargin: '0px 300px 0px 0px'});
+      }
+      sentinelObserver.observe(s);
+    } else {
+      rail.appendChild(s); // move to end
+    }
+  }
+  function removeSentinel(){
+    const s = rail.querySelector('.sentinel');
+    if(s) s.remove();
+  }
+
+  let activeBubbleEl = null;
+  function markActiveBubble(){
+    if(activeBubbleEl) activeBubbleEl.classList.remove('active');
+    const el = rail.children[activeIndex];
+    if(el && el.classList && el.classList.contains('bubble')){
+      el.classList.add('active');
+      activeBubbleEl = el;
+    } else {
+      activeBubbleEl = null;
+    }
+    // Looked up from allChannels (never filtered) rather than
+    // filtered[activeIndex] — the label should always reflect what's
+    // actually playing, even if the current filters happen to hide that
+    // channel from the visible rail right now.
+    const playing = activePlayingChannelId != null
+      ? allChannels.find(c => c.id === activePlayingChannelId)
+      : null;
+    nowPlayingLabel.textContent = playing ? playing.name : '';
+  }
+
+  // ---------- Drag to scroll sideways ----------
+  let isDown = false, startX = 0, startScroll = 0;
+
+  // ---------- Dock hover magnify + edge auto-scroll (perf-optimized) ----------
+  // The naive version of this measured every rendered bubble on every
+  // mousemove event — with hundreds of channels in the dock, that's
+  // hundreds of forced layout reads per frame, a real source of visible
+  // lag while browsing. This version throttles to one update per animation
+  // frame and only measures the handful of bubbles actually within reach
+  // of the cursor, found via index math instead of scanning the whole dock.
+  const EDGE_ZONE = 110;   // px from either edge that triggers auto-scroll
+  const EDGE_SPEED = 24;   // max px per animation frame (was 6 — far too slow for long lists)
+  const ITEM_STRIDE = 98;  // .bubble width (78px) + .rail gap (20px)
+  const RAIL_PAD_LEFT = 64; // matches .rail's left padding
+  const INFLUENCE = 170;
+  let autoScrollSpeed = 0;
+  let pendingMouseX = null;
+  let rafQueued = false;
+  let magnifyActive = new Set();
+
+  function updateMagnify(mx){
+    const railRect = rail.getBoundingClientRect();
+    const contentX = mx - railRect.left + rail.scrollLeft - RAIL_PAD_LEFT;
+    const centerIdx = Math.round(contentX / ITEM_STRIDE);
+    const span = Math.ceil(INFLUENCE / ITEM_STRIDE) + 1;
+    const nextActive = new Set();
+
+    for(let i = centerIdx - span; i <= centerIdx + span; i++){
+      const el = rail.children[i];
+      if(!el || !el.classList || !el.classList.contains('bubble')) continue;
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width/2;
+      const dist = Math.abs(mx - cx);
+      const influence = Math.max(0, 1 - dist/INFLUENCE);
+      if(influence > 0){
+        el.style.transform = `translateY(${-influence*8}px) scale(${1 + influence*0.32})`;
+        nextActive.add(i);
+      }
+    }
+    magnifyActive.forEach(i=>{
+      if(!nextActive.has(i)){
+        const el = rail.children[i];
+        if(el) el.style.transform = '';
+      }
+    });
+    magnifyActive = nextActive;
+
+    if(isDown){ autoScrollSpeed = 0; return; }
+    const distFromLeft = mx - railRect.left;
+    const distFromRight = railRect.right - mx;
+    if(distFromLeft < EDGE_ZONE){
+      autoScrollSpeed = -EDGE_SPEED * (1 - Math.max(distFromLeft, 0) / EDGE_ZONE);
+    } else if(distFromRight < EDGE_ZONE){
+      autoScrollSpeed = EDGE_SPEED * (1 - Math.max(distFromRight, 0) / EDGE_ZONE);
+    } else {
+      autoScrollSpeed = 0;
+    }
+  }
+
+  rail.addEventListener('mousemove', (e)=>{
+    pendingMouseX = e.clientX;
+    if(!rafQueued){
+      rafQueued = true;
+      requestAnimationFrame(()=>{
+        rafQueued = false;
+        if(pendingMouseX !== null) updateMagnify(pendingMouseX);
+      });
+    }
+  });
+  rail.addEventListener('mouseleave', ()=>{
+    magnifyActive.forEach(i=>{
+      const el = rail.children[i];
+      if(el) el.style.transform = '';
+    });
+    magnifyActive = new Set();
+    autoScrollSpeed = 0;
+    pendingMouseX = null;
+  });
+  (function autoScrollLoop(){
+    if(autoScrollSpeed !== 0 && !isDown) rail.scrollLeft += autoScrollSpeed;
+    requestAnimationFrame(autoScrollLoop);
+  })();
+
+  rail.addEventListener('mousedown', (e)=>{
+    isDown = true; rail.classList.add('dragging');
+    startX = e.pageX; startScroll = rail.scrollLeft;
+    autoScrollSpeed = 0;
+  });
+  window.addEventListener('mouseup', ()=>{ isDown=false; rail.classList.remove('dragging'); });
+  window.addEventListener('mousemove', (e)=>{
+    if(!isDown) return;
+    rail.scrollLeft = startScroll - (e.pageX - startX);
+  });
+  rail.addEventListener('wheel', (e)=>{
+    if(Math.abs(e.deltaY) > Math.abs(e.deltaX)){
+      rail.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, {passive:false});
+
+
+  // ---------- Filters wiring ----------
+  // Country / Category / Language are linked: they combine (AND) to narrow
+  // the channel list, and each dropdown's own option list narrows to only
+  // what's still reachable given the other two current selections.
+  function matchesFilters(c, f){
+    if(f.country && c.country !== f.country) return false;
+    if(f.category && c.category !== f.category) return false;
+    if(f.language && c.language !== f.language) return false;
+    return true;
+  }
+
+  function refreshFilters(){
+    let countryOptions, categoryOptions, languageOptions;
+
+    // Two passes so a value invalidated by another dropdown's narrowing has
+    // a chance to relax the remaining option lists back open again.
+    for(let pass=0; pass<2; pass++){
+      countryOptions  = uniqueSorted(allChannels.filter(c=>matchesFilters(c, {category:categorySel.value, language:languageSel.value})).map(c=>c.country));
+      categoryOptions = uniqueSorted(allChannels.filter(c=>matchesFilters(c, {country:countrySel.value,   language:languageSel.value})).map(c=>c.category));
+      languageOptions = uniqueSorted(allChannels.filter(c=>matchesFilters(c, {country:countrySel.value,   category:categorySel.value})).map(c=>c.language));
+
+      if(countrySel.value && !countryOptions.includes(countrySel.value)) countrySel.value = '';
+      if(categorySel.value && !categoryOptions.includes(categorySel.value)) categorySel.value = '';
+      if(languageSel.value && !languageOptions.includes(languageSel.value)) languageSel.value = '';
+    }
+
+    populateSelect(countrySel, countryOptions, 'Country', countrySel.value);
+    populateSelect(categorySel, categoryOptions, 'Category', categorySel.value);
+    populateSelect(languageSel, languageOptions, 'Language', languageSel.value);
+
+    applyFilters();
+  }
+  countrySel.addEventListener('change', refreshFilters);
+  categorySel.addEventListener('change', refreshFilters);
+  languageSel.addEventListener('change', refreshFilters);
+  let searchDebounce;
+  searchInput.addEventListener('input', ()=>{
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(applyFilters, 220);
+  });
+
+  // ---------- Playback ----------
+  let playbackToken = 0; // guards against a stale retry acting after the person switched channels
+
+  // Route index 0 is "no proxy" (direct); indexes 1+ are tried in order on
+  // failure. Your own proxy (MY_PROXY_URL, if set) goes first since it
+  // won't be rate-limited the way shared public ones are; the two public
+  // proxies are the fallback so one being down doesn't sink the chain.
+  // (corsproxy.io is deliberately not in this list — it now requires a paid
+  // API key for any non-localhost origin, so it 403s every request from a
+  // real deployed site.)
+  const PLAYBACK_ROUTES = [
+    null,
+    ...(MY_PROXY_URL ? [u => `${MY_PROXY_URL}?url=${encodeURIComponent(u)}`] : []),
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    ...(MY_HOME_RELAY_URL ? [u => `${MY_HOME_RELAY_URL}?url=${encodeURIComponent(u)}`] : [])
+  ];
+  // Mirrors PLAYBACK_ROUTES index-for-index, for readable failure reasons.
+  const ROUTE_LABELS = [
+    'direct',
+    ...(MY_PROXY_URL ? ['your Worker'] : []),
+    'codetabs',
+    'allorigins',
+    ...(MY_HOME_RELAY_URL ? ['home relay'] : [])
+  ];
+  // Bases used to detect a URL that's already been routed through a proxy —
+  // our own Worker rewrites playlist contents to point straight at itself
+  // with an already-encoded ?url=, so those must NOT be wrapped again (that
+  // would double-encode the target and break every request).
+  const PROXY_BASES = [
+    ...(MY_PROXY_URL ? [MY_PROXY_URL] : []),
+    'https://api.codetabs.com/v1/proxy',
+    'https://api.allorigins.win/raw',
+    ...(MY_HOME_RELAY_URL ? [MY_HOME_RELAY_URL] : [])
+  ];
+  // The home relay only ever appears at the END of the route list, so a
+  // channel dispatched straight to it (see playChannel's known-blocked-
+  // host handling) fails cleanly to the VLC/resolve-link handoff on its
+  // own first miss, instead of cycling through direct/Worker/public
+  // proxies that are already known-useless for this category of channel.
+  const HOME_RELAY_ROUTE_IDX = MY_HOME_RELAY_URL ? PLAYBACK_ROUTES.length - 1 : -1;
+  function routedUrl(url, routeIdx){
+    if(PROXY_BASES.some(base => url.startsWith(base))) return url;
+    const wrap = PLAYBACK_ROUTES[routeIdx];
+    return wrap ? wrap(url) : url;
+  }
+
+  // ---------- Channel health check (reachability only, never plays) ----------
+  // Tests a channel through the exact same route chain playback uses —
+  // direct, then your Worker, then the public fallbacks — recording what
+  // actually happened on each attempted route so a failure has a real
+  // reason, not just a red dot. Runs the entire currently-filtered list;
+  // click "Stop checking" any time to cancel. Deliberately does NOT force
+  // extra bubbles to render just to show a dot — for a filter with
+  // thousands of matches that would recreate the exact DOM-bloat/lag this
+  // app's rendering was optimized against. Results are cached on each
+  // channel and applied automatically whenever its bubble does render.
+  const CHECK_TIMEOUT = 9000;
+  const CHECK_CONCURRENCY = 6;
+  let checkRunId = 0;
+  let isChecking = false;
+
+  async function checkChannelReachable(ch){
+    // Known-unfixable cases (see streamCapability above) — don't burn
+    // through every route's timeout and this app's own Worker/public-
+    // proxy quota just to relearn an already-known answer.
+    const capability = streamCapability(ch.url);
+    if(!capability.playable) return {ok:false, reason: capability.reason};
+
+    const isHls = /\.m3u8($|\?)/i.test(ch.url);
+    const startRoute = (window.location.protocol === 'https:' && /^http:\/\//i.test(ch.url)) ? 1 : 0;
+    const attempts = [];
+    for(let routeIdx = startRoute; routeIdx < PLAYBACK_ROUTES.length; routeIdx++){
+      const label = ROUTE_LABELS[routeIdx] || `route ${routeIdx}`;
+      const controller = new AbortController();
+      const timer = setTimeout(()=>controller.abort(), CHECK_TIMEOUT);
+      try{
+        const res = await fetch(routedUrl(ch.url, routeIdx), {signal: controller.signal});
+        clearTimeout(timer);
+        if(!res.ok){
+          attempts.push(`${label}: HTTP ${res.status}`);
+          continue;
+        }
+        if(isHls){
+          const text = await res.text();
+          if(/^\s*#EXTM3U/i.test(text)) return {ok:true, reason:`Reachable via ${label}`, route: routeIdx};
+          attempts.push(`${label}: response wasn't a playlist`);
+          continue;
+        }
+        return {ok:true, reason:`Reachable via ${label}`, route: routeIdx};
+      }catch(e){
+        clearTimeout(timer);
+        attempts.push(`${label}: ${e.name === 'AbortError' ? 'timed out' : 'blocked (network/CORS)'}`);
+      }
+    }
+    return {ok:false, reason: attempts.length ? attempts.join(' · ') : 'No routes attempted'};
+  }
+
+  async function runWithConcurrency(items, limit, worker){
+    let next = 0;
+    const lane = async ()=>{
+      while(next < items.length){
+        const i = next++;
+        await worker(items[i], i);
+      }
+    };
+    await Promise.all(Array.from({length: Math.min(limit, items.length)}, lane));
+  }
+
+  function setBubbleCheckState(i, ok, reason){
+    const el = rail.children[i];
+    if(!el || !el.classList || !el.classList.contains('bubble')) return;
+    el.classList.remove('check-ok', 'check-fail');
+    el.classList.add(ok ? 'check-ok' : 'check-fail');
+    const dot = el.querySelector('.status-dot');
+    if(dot) dot.title = reason || (ok ? 'Reachable' : 'Not reachable');
+  }
+
+  checkChannelsBtn.addEventListener('click', async ()=>{
+    if(isChecking){
+      checkRunId++; // invalidates the in-flight run; already-sent fetches just get ignored
+      isChecking = false;
+      checkChannelsBtn.classList.remove('running');
+      checkBtnLabel.textContent = 'Check channels';
+      checkStatus.textContent = 'Stopped';
+      return;
+    }
+    if(!filtered.length){ showToast('No channels to check — adjust your filters first.'); return; }
+
+    const myRun = ++checkRunId;
+    isChecking = true;
+    checkChannelsBtn.classList.add('running');
+    checkBtnLabel.textContent = 'Stop checking';
+
+    const list = filtered.slice();
+    let done = 0, okCount = 0;
+    checkStatus.textContent = `Checking 0 / ${list.length.toLocaleString()}…`;
+
+    await runWithConcurrency(list, CHECK_CONCURRENCY, async (ch, i)=>{
+      const result = await checkChannelReachable(ch);
+      if(myRun !== checkRunId) return; // a newer run started, or this one was stopped
+      ch.checked = result.ok ? 'ok' : 'fail';
+      ch.checkReason = result.reason;
+      ch.checkedRoute = result.ok ? result.route : undefined;
+      if(result.ok) okCount++;
+      done++;
+      checkStatus.textContent = `Checking ${done.toLocaleString()} / ${list.length.toLocaleString()}…`;
+      setBubbleCheckState(i, result.ok, result.reason);
+    });
+
+    if(myRun !== checkRunId) return; // stopped mid-run — don't stomp the "Stopped" status
+    isChecking = false;
+    checkChannelsBtn.classList.remove('running');
+    checkBtnLabel.textContent = 'Check channels';
+    checkStatus.textContent = `${okCount.toLocaleString()} of ${list.length.toLocaleString()} are reachable`;
+    workingOnlyWrap.style.display = 'flex';
+  });
+
+  workingOnlyToggle.addEventListener('change', applyFilters);
+
+  // hls.js path: keeps hls.js's internal base URL as the ORIGINAL address
+  // (passed to loadSource below) so it keeps resolving relative segment/
+  // sub-playlist URIs correctly — only the actual network request for each
+  // request gets rewritten to the current route here. On any fatal error we
+  // A health check only validates the master playlist/URL is fetchable —
+  // real playback can still fail further down the chain (sub-playlists,
+  // segments, tokens that expire between check and play). When that
+  // happens, correct the dot rather than leaving a stale "reachable" mark.
+  function markChannelUnplayable(ch, reason){
+    ch.checked = 'fail';
+    ch.checkReason = reason;
+    const el = rail.children[activeIndex];
+    if(el && el.classList && el.classList.contains('bubble') && Number(el.dataset.idx) === activeIndex){
+      el.classList.remove('check-ok');
+      el.classList.add('check-fail');
+      const dot = el.querySelector('.status-dot');
+      if(dot) dot.title = reason;
+    }
+  }
+
+  // ---------- Stream protocol capability ----------
+  // A proxy changes *transport* (adds HTTPS, adds CORS headers) — it can't
+  // change *protocol*. RTSP/RTMP/UDP/RTP/MMS are stateful streaming
+  // protocols with no browser API that speaks them at all (no fetch/XHR/
+  // MediaSource path exists for any of them), so no amount of routing
+  // through Workers or public proxies will ever make one play in a <video>
+  // tag. This is a hard platform limitation, not a bug to route around —
+  // detecting it upfront means a channel using one of these fails
+  // instantly with a clear reason instead of silently cycling through
+  // every proxy in PLAYBACK_ROUTES over ~30 seconds before giving up.
+  // VLC plays all of these natively, so the fix here is a one-click
+  // handoff via a downloaded .m3u file VLC opens directly (see
+  // copyVlcStreamUrl below), not a proxy trick.
+  const UNPLAYABLE_SCHEMES = new Set(['rtsp','rtsps','rtmp','rtmps','rtmpt','rtmpe','udp','rtp','mms','mmsh','mmst']);
+
+  // Hosts confirmed (not guessed) to reject every cloud-hosted route —
+  // direct browser fetch, this app's own Worker, and both public proxies
+  // — with an IP-reputation/bot-detection block that happens before any
+  // request content is even evaluated. Verified directly: a fetch to
+  // Pluto's stitcher from an entirely unrelated cloud network returned an
+  // explicit "blocked — bot detection" response. No header, signature, or
+  // proxy trick changes what IP range a request originates from, so
+  // there's no fixable-in-this-app failure mode here — same category as
+  // the RTSP/RTMP protocol check above, just at the network-policy layer
+  // instead of the browser-capability layer. Detecting it upfront saves
+  // ~30s of cycling every proxy in PLAYBACK_ROUTES to relearn the same
+  // known answer, and lets the UI say something honest instead of
+  // showing a generic failure.
+  const KNOWN_BLOCKED_HOSTS = [
+    'jmp2.uk',                                // Pluto TV / Samsung TV Plus redirect resolver
+    'stitcher-ipv4.pluto.tv',                 // Pluto's ad-stitching CDN itself (in case a list points here directly)
+    'service-stitcher.clusters.pluto.tv'
+  ];
+  function isKnownBlockedHost(url){
+    let host;
+    try{ host = new URL(url).hostname.toLowerCase(); }
+    catch(e){ return false; }
+    return KNOWN_BLOCKED_HOSTS.some(h => host === h || host.endsWith('.' + h));
+  }
+
+  function streamCapability(url){
+    let scheme;
+    try{ scheme = new URL(url).protocol.replace(':','').toLowerCase(); }
+    catch(e){ return {playable:false, scheme:null}; }
+    if(UNPLAYABLE_SCHEMES.has(scheme)) return {playable:false, scheme, reason:`${scheme}:// isn't playable in a browser`};
+    if(isKnownBlockedHost(url)) return {playable:false, scheme, reason:'blocks cloud/proxy traffic — needs VLC or a residential relay'};
+    return {playable:true, scheme};
+  }
+
+  // Matches ffmpeg-relay.js's expected naming exactly (see the comment
+  // above its CHANNELS array) — "00s Replay" -> "00s-replay" — so a
+  // channel someone's already configured there gets found automatically
+  // by name, with zero per-channel wiring on the app side.
+  function slugify(name){
+    return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  }
+
+  function ffmpegRelayUrlFor(ch){
+    if(!MY_FFMPEG_RELAY_URL) return null;
+    return `${MY_FFMPEG_RELAY_URL.replace(/\/+$/,'')}/${slugify(ch.name)}/index.m3u8`;
+  }
+
+  // Probes whether ffmpeg-relay.js actually has this channel configured
+  // and running before committing to it — avoids swapping ch.url to a
+  // dead relay address and only discovering that once playback fails.
+  async function tryFfmpegRelay(ch){
+    const candidate = ffmpegRelayUrlFor(ch);
+    if(!candidate) return null;
+    try{
+      const controller = new AbortController();
+      const timer = setTimeout(()=>controller.abort(), 4000);
+      const res = await fetch(candidate, {signal: controller.signal});
+      clearTimeout(timer);
+      if(!res.ok) return null;
+      const text = await res.text();
+      return /^\s*#EXTM3U/i.test(text) ? candidate : null;
+    }catch(e){ return null; }
+  }
+
+  // vlc:// links were tried here previously and don't work for most
+  // people: VLC does NOT register that protocol scheme on install by
+  // default — it requires a separate third-party handler tool almost
+  // nobody has, so the browser silently has nowhere to send the click.
+  // Copying the raw stream URL sidesteps that entirely: paste it straight
+  // into VLC's own "Open Network Stream" dialog (Ctrl+N) — no file
+  // download, no file-association step, works identically on every OS.
+  async function copyVlcStreamUrl(ch){
+    const text = ch.url;
+    try{
+      await navigator.clipboard.writeText(text);
+    }catch(e){
+      // Clipboard API can fail (older browser, insecure context, denied
+      // permission) — fall back to the classic hidden-textarea + execCommand
+      // trick, which works in far more places even though it's deprecated.
+      try{
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }catch(e2){
+        showToast('Could not copy automatically — long-press or select the link manually.');
+        return;
+      }
+    }
+    showToast(`Copied — paste into VLC's "Open Network Stream" (Ctrl+N).`);
+  }
+
+  // ---------- Manual resolve for redirect-style blocks (jmp2.uk etc) ----------
+  // This is the one thing that DOES get past the block, because it isn't
+  // a script-initiated request at all: typing/pasting a URL into the
+  // address bar (or a real top-level navigation like window.open here)
+  // is a normal page load, which the target's bot-detection doesn't
+  // reject the way it rejects fetch()/XHR. There is no way to automate
+  // the "read the resulting URL back" step — the Same-Origin Policy
+  // explicitly forbids JS from reading a cross-origin popup's location
+  // once it navigates away (same restriction that stops any site from
+  // using your browser to probe other sites' redirects), so a genuine
+  // human copy/paste is the only way this data crosses back into the
+  // page. This is a manual, occasional-use escape hatch, not a fix —
+  // the resolved URL is typically a session/token-bound link that goes
+  // stale after a while and needs re-resolving.
+  function isResolvableRedirect(ch){
+    const check = streamCapability(ch.originalUrl || ch.url);
+    return !check.playable && isKnownBlockedHost(ch.originalUrl || ch.url);
+  }
+
+  function resolveJmp2Link(ch, idx){
+    const source = ch.originalUrl || ch.url;
+    window.open(source, '_blank', 'noopener');
+    const pasted = window.prompt(
+      `A new tab just opened to "${ch.name}"'s link. Wait for it to finish redirecting, then copy the FULL address-bar URL from that tab and paste it here:`
+    );
+    if(!pasted) return;
+    let parsed;
+    try{ parsed = new URL(pasted.trim()); }
+    catch(e){ showToast("That doesn't look like a valid URL — nothing changed."); return; }
+    if(parsed.protocol !== 'http:' && parsed.protocol !== 'https:'){
+      showToast('Needs to be an http(s) URL — nothing changed.');
+      return;
+    }
+    ch.originalUrl = ch.originalUrl || ch.url; // keep the jmp2.uk link so "Resolve" can be run again once this expires
+    ch.url = parsed.toString();
+    showToast(`Resolved — trying "${ch.name}" with the direct link now.`);
+    playChannel(idx);
+  }
+
+  // ---------- Route racing (speed) ----------
+  // Sequentially trying direct -> your Worker -> codetabs -> allorigins
+  // means a channel whose *fast* route (direct) has started failing pays
+  // its full manifestLoadingTimeOut (8s) before even starting the *next*
+  // attempt — the exact "used to start instantly, now takes forever"
+  // symptom. Racing direct and your Worker concurrently instead means
+  // startup latency is bounded by whichever of the two actually works,
+  // not their sum. Public proxies are deliberately excluded from the
+  // race (only tried after, sequentially) since they're shared/rate-
+  // limited services — firing them on every single channel switch just
+  // to shave latency isn't worth burning through their quota.
+  const RACE_TIMEOUT = 7500;
+  async function raceRoutes(ch, candidateRoutes){
+    const isHls = /\.m3u8($|\?)/i.test(ch.url);
+    const attempt = async (routeIdx) => {
+      const controller = new AbortController();
+      const timer = setTimeout(()=>controller.abort(), RACE_TIMEOUT);
+      try{
+        const res = await fetch(routedUrl(ch.url, routeIdx), {signal: controller.signal});
+        if(!res.ok) throw new Error('bad status');
+        if(isHls){
+          const text = await res.text();
+          if(!/^\s*#EXTM3U/i.test(text)) throw new Error('not a playlist');
+        }
+        return routeIdx;
+      } finally { clearTimeout(timer); }
+    };
+    const results = await Promise.allSettled(candidateRoutes.map(attempt));
+    // Prefer the earliest-listed route among the ones that actually
+    // succeeded, so "direct" still wins over "your Worker" when both are
+    // fine — keeping behavior identical to today for the common case.
+    for(const routeIdx of candidateRoutes){
+      const r = results[candidateRoutes.indexOf(routeIdx)];
+      if(r.status === 'fulfilled') return routeIdx;
+    }
+    return null;
+  }
+
+
+  // log the real reason and step to the next route before giving up.
+  function startHlsPlayback(ch, token, routeIdx){
+    console.warn(`[diagnostic] startHlsPlayback entered for "${ch.name}" via route ${routeIdx}`);
+    if(hls){ hls.destroy(); hls = null; }
+    if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
+    // Smaller buffer targets on mobile — 30s of forward+back buffer is a
+    // meaningful chunk of memory to allocate in the same instant hls.js
+    // is also standing up MediaSource, fetching the manifest, and
+    // starting to decode. On a memory-constrained phone that's real
+    // added peak right at the exact moment playback starts.
+    const isMobile = window.innerWidth <= 640;
+    hls = new Hls({
+      // Runs TS demuxing in a separate Web Worker thread instead of the
+      // main one — the main thread is exactly what's been fought for
+      // throughout this app (list rendering, EPG parsing, UI
+      // responsiveness), so keeping decode-adjacent work off it matters
+      // more here than in a simpler page. hls.js defaults this to true,
+      // but pinning it explicitly means it stays true regardless of any
+      // future hls.js version changing that default.
+      enableWorker: true,
+      maxBufferLength: isMobile ? 15 : 30,
+      // Trims already-played buffer so memory usage stays flat over a long
+      // live session instead of growing unbounded — a common source of
+      // gradual slowdown/lag the longer a channel has been playing.
+      backBufferLength: isMobile ? 10 : 30,
+      // Fail a slow/unresponsive route quickly rather than stalling —
+      // matters especially on the proxied routes, so a bad one gets
+      // replaced by the next in PLAYBACK_ROUTES sooner. Must stay
+      // comfortably ABOVE the Worker's own internal per-attempt timeout
+      // (7s) — too close together and the client aborts the connection
+      // right as the Worker's own upstream fetch is about to succeed,
+      // turning a slow-but-working stream into a false failure every time.
+      fragLoadingTimeOut: 12000,
+      manifestLoadingTimeOut: 9000,
+      levelLoadingTimeOut: 9000,
+      // hls.js's defaults retry each of these with exponential backoff
+      // (the manifest one defaults to up to 64s of retrying) BEFORE ever
+      // surfacing a fatal error — which means our own route-cascade below
+      // never even gets a chance to try the next route until hls.js has
+      // already burned through its own retry budget. This is very likely
+      // the actual cause behind "a channel that used to start instantly
+      // now takes forever": it's not necessarily slower, it's retrying
+      // the same failing route repeatedly before giving up on it. Capping
+      // retries tightly here means a bad route fails fast and control
+      // passes to the next PLAYBACK_ROUTES entry promptly instead.
+      manifestLoadingMaxRetry: 1,
+      manifestLoadingRetryDelay: 500,
+      levelLoadingMaxRetry: 1,
+      levelLoadingRetryDelay: 500,
+      fragLoadingMaxRetry: 2,
+      fragLoadingRetryDelay: 500,
+      // Chases the live edge instead of quietly drifting behind it over
+      // — without this, hls.js just plays from wherever the buffer
+      // happened to start and lets drift accumulate silently over a long
+      // 24/7 session.
+      liveSyncDurationCount: 3,
+      // Starts fetching the very first fragment while the manifest is
+      // still being parsed, instead of waiting for manifest-parse to
+      // fully finish first — shaves a small but real amount off
+      // time-to-first-frame on every channel switch.
+      startFragPrefetch: true,
+      xhrSetup: function(xhr, url){
+        const routed = routedUrl(url, routeIdx);
+        if(routed !== url) xhr.open('GET', routed, true);
+      }
+    });
+    hls.loadSource(ch.url);
+    // Diagnostic only — logs what hls.js actually detected about this
+    // stream's tracks once the manifest parses. The codec-rejection
+    // theory (bufferAddCodecError etc, listened for above) turned out
+    // not to be firing for the reported black-screen-with-audio case,
+    // which means the real cause is something this log is meant to
+    // reveal rather than another guess: if hasVideo is false here, hls.js
+    // never found a video track in the stream at all (a demuxing/PMT
+    // issue with the source itself, not a codec hls.js is rejecting);
+    // if hasVideo is true, the track exists and is presumably decoding,
+    // pointing instead at a rendering-layer issue (GPU/driver) that
+    // wouldn't throw any hls.js error either way.
+    hls.on(Hls.Events.MANIFEST_PARSED, (evt, data)=>{
+      if(token !== playbackToken) return;
+      const level = data.levels && data.levels[data.firstLevel];
+      console.warn(`[diagnostic] "${ch.name}" manifest parsed:`, {
+        hasVideo: level && level.videoCodec !== undefined,
+        videoCodec: level && level.videoCodec,
+        audioCodec: level && level.audioCodec,
+        width: level && level.width,
+        height: level && level.height,
+      });
+    });
+    hls.attachMedia(video);
+    // hls.js treats an unsupported VIDEO codec as non-fatal whenever the
+    // AUDIO codec still decodes fine — it just keeps playing audio and
+    // silently drops video, since from hls.js's point of view playback
+    // hasn't actually stopped. That's exactly why this showed as a
+    // silent black screen with sound instead of any visible error: the
+    // main handler below only ever reacts to data.fatal. No in-browser
+    // fallback fixes this either — mpegts.js and native HLS both depend
+    // on the same underlying browser/OS decoder, so if it can't decode
+    // this video codec (commonly HEVC/H.265, which most desktop browsers
+    // don't support in MSE), none of them will. VLC bundles its own
+    // software decoders and handles virtually anything, which is why
+    // that's the actual fix here rather than another in-app retry.
+    hls.on(Hls.Events.ERROR, (evt, data)=>{
+      if(token !== playbackToken || data.fatal) return;
+      const codecIssue = data.details === 'bufferAddCodecError' || data.details === 'bufferIncompatibleCodecsError';
+      if(!codecIssue) return;
+      console.warn(`Video codec not supported for "${ch.name}":`, data.details, data.mimeType || '');
+      showToast(`"${ch.name}" uses a video format this browser can't decode (audio-only). Tap the VLC button to watch it there.`);
+      markChannelUnplayable(ch, `Video codec not supported in this browser — open in VLC instead`);
+    });
+    hls.on(Hls.Events.ERROR, (evt, data)=>{
+      if(token !== playbackToken || !data.fatal) return;
+      console.warn(`Playback failed for "${ch.name}" via route ${routeIdx}:`, data.type, data.details, data.response || '');
+      if(routeIdx < PLAYBACK_ROUTES.length - 1){
+        showToast(`"${ch.name}" was blocked — trying another route…`);
+        startHlsPlayback(ch, token, routeIdx + 1);
+        return;
+      }
+      showToast(`"${ch.name}" isn't responding right now — try the VLC button.`);
+      markChannelUnplayable(ch, `Failed during playback (${data.details || data.type || 'fatal error'})`);
+    });
+    video.play().catch(()=>{});
+  }
+
+  // Safari's native HLS and any non-.m3u8 direct stream: same idea, but
+  // since we can't intercept individual sub-requests here, a failure just
+  // steps the whole src to the next route.
+  //
+  // Before advancing routes, though, try mpegts.js at the SAME route
+  // first. Native <video src=...> only understands MP4/WebM — it cannot
+  // demux raw MPEG-TS at all, which is exactly what a lot of free IPTV
+  // "direct" links actually are (no .m3u8 wrapper, just a continuous
+  // .ts stream). That's a container/codec gap, not a network problem: no
+  // proxy or CORS fix changes it, which is why a channel can work
+  // perfectly in VLC (which decodes any container) while failing here on
+  // every single route identically. mpegts.js transmuxes MPEG-TS into
+  // fragments MSE can actually play, so trying it before giving up on a
+  // route (rather than only after exhausting all of them) is what
+  // actually recovers these channels instead of just failing faster.
+  function startMpegtsPlayback(ch, token, routeIdx, onFail){
+    console.warn(`[diagnostic] startMpegtsPlayback entered for "${ch.name}" via route ${routeIdx}`);
+    if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
+    if(hls){ hls.destroy(); hls = null; }
+    if(!window.mpegts || !mpegts.getFeatureList().mseLivePlayback){ onFail(); return; }
+    video.removeAttribute('src'); video.load();
+    mpegtsPlayer = mpegts.createPlayer({
+      type: 'mpegts',
+      isLive: true,
+      url: routedUrl(ch.url, routeIdx)
+    }, {
+      liveBufferLatencyChasing: true
+    });
+    mpegtsPlayer.attachMediaElement(video);
+    mpegtsPlayer.on(mpegts.Events.ERROR, ()=>{
+      if(token !== playbackToken) return;
+      console.warn(`mpegts.js playback failed for "${ch.name}" via route ${routeIdx}`);
+      if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
+      onFail();
+    });
+    try{
+      mpegtsPlayer.load();
+      mpegtsPlayer.play().catch(()=>{});
+    }catch(e){ onFail(); }
+  }
+
+  function startDirectPlayback(ch, token, routeIdx){
+    console.warn(`[diagnostic] startDirectPlayback entered for "${ch.name}" via route ${routeIdx}, url:`, routedUrl(ch.url, routeIdx));
+    const tryNextRoute = () => {
+      if(routeIdx < PLAYBACK_ROUTES.length - 1){
+        showToast(`"${ch.name}" was blocked — trying another route…`);
+        startDirectPlayback(ch, token, routeIdx + 1);
+      } else {
+        showToast(`"${ch.name}" isn't responding right now — try the VLC button.`);
+        markChannelUnplayable(ch, 'Failed during playback');
+      }
+    };
+    video.src = routedUrl(ch.url, routeIdx);
+    video.onerror = ()=>{
+      if(token !== playbackToken) return;
+      console.warn(`Direct playback failed for "${ch.name}" via route ${routeIdx} — trying mpegts.js on the same route`);
+      startMpegtsPlayback(ch, token, routeIdx, tryNextRoute);
+    };
+    video.addEventListener('loadedmetadata', ()=> video.play().catch(()=>{}), {once:true});
+  }
+
+  async function playChannel(idx){
+    const ch = filtered[idx];
+    if(!ch) return;
+    if(!ch.url){
+      showToast(`"${ch.name}" doesn't have a usable stream link.`);
+      return;
+    }
+
+    const capability = streamCapability(ch.url);
+    if(!capability.scheme || (capability.scheme !== 'http' && capability.scheme !== 'https' && capability.playable)){
+      // Doesn't parse as a URL at all, or parses to some other scheme we
+      // don't recognize as either playable-in-browser or a known
+      // VLC-only protocol — nothing useful to hand off to either path.
+      showToast(`"${ch.name}" doesn't have a usable stream link.`);
+      return;
+    }
+    vlcBtn.onclick = () => copyVlcStreamUrl(ch);
+    vlcBtn.style.display = '';
+    resolveBtn.style.display = isResolvableRedirect(ch) ? '' : 'none';
+    resolveBtn.onclick = () => resolveJmp2Link(ch, idx);
+
+    // Known-blocked-host channels (jmp2.uk/Pluto etc) get one real shot
+    // via the home relay if configured — it's the lighter of the two
+    // relays for this specific case, confirmed to work. RTSP/RTMP/UDP
+    // protocols never match KNOWN_BLOCKED_HOSTS, so this never fires for
+    // those — home-relay-proxy.js does a CORS-adding fetch() passthrough,
+    // and fetch() fundamentally cannot speak any of those protocols.
+    const isProtocolCase = capability.scheme && UNPLAYABLE_SCHEMES.has(capability.scheme);
+    const tryHomeRelay = !isProtocolCase && !capability.playable && HOME_RELAY_ROUTE_IDX >= 0 && isKnownBlockedHost(ch.url);
+
+    if(!capability.playable){
+      // The ffmpeg relay is the ONLY thing that can ever help a protocol
+      // case (no browser networking API speaks RTSP/RTMP/UDP, with or
+      // without a proxy) — and it's a valid alternative for the
+      // blocked-host case too. Probed before committing (see
+      // tryFfmpegRelay) so a channel the relay was never configured for
+      // doesn't silently swap to a dead URL.
+      const relayUrl = await tryFfmpegRelay(ch);
+      if(relayUrl){
+        ch.originalUrl = ch.originalUrl || ch.url;
+        ch.url = relayUrl;
+        showToast(`"${ch.name}" found on your ffmpeg relay — playing now.`);
+        return playChannel(idx);
+      }
+
+      if(isProtocolCase){
+        // rtsp://, rtmp://, udp:// etc aren't HTTP URLs at all — there is
+        // nothing a route cascade could meaningfully attempt here
+        // (PLAYBACK_ROUTES only knows how to wrap http(s) targets for a
+        // CORS proxy), so there's no "real attempt" to make beyond what
+        // was already tried above. Message immediately with the honest
+        // reason rather than pretending to try something that can't work.
+        activeIndex = idx;
+        activePlayingChannelId = ch.id;
+        markActiveBubble();
+        playbackToken++;
+        showGuideFor(ch);
+        showToast(`"${ch.name}" ${capability.reason}. Tap the VLC button to open it there.`);
+        markChannelUnplayable(ch, `${capability.reason} — open in VLC instead`);
+        return;
+      }
+      // Blocked-host case with no relay available: this IS a normal
+      // http(s) URL, so — unlike the protocol case above — a real
+      // attempt through the usual route cascade is meaningful and worth
+      // actually trying, rather than pre-judging it as dead purely from
+      // the hostname. Falls through to the normal playback path below;
+      // if every route genuinely fails, the existing cascade-exhaustion
+      // handling in startHlsPlayback/startDirectPlayback shows the
+      // failure (now mentioning the VLC button too) exactly like any
+      // other channel that doesn't work.
+    }
+
+    activeIndex = idx;
+    activePlayingChannelId = ch.id;
+    markActiveBubble();
+    playbackToken++;
+    const token = playbackToken;
+    let playbackStarted = false;
+    video.addEventListener('playing', function onPlaying(){
+      if(playbackToken === token) playbackStarted = true;
+      video.removeEventListener('playing', onPlaying);
+    });
+
+    emptyState.style.display = 'none';
+    controls.style.display = 'flex';
+    playerFrame.classList.add('is-live');
+
+    const initials = ch.name.replace(/[^A-Za-z0-9]/g,'').slice(0,2).toUpperCase() || '?';
+    logoDisplay.innerHTML = ch.logo
+      ? `<img src="${ch.logo}" referrerpolicy="no-referrer" onerror="this.outerHTML='<div class=&quot;logo-fallback&quot;>${initials}</div>';">`
+      : `<div class="logo-fallback">${initials}</div>`;
+    logoDisplay.innerHTML += `<div class="logo-name">${ch.name.replace(/</g,'&lt;')}</div>`;
+
+    showControls();
+    // The guide fetch is a separate, genuinely heavy cost of its own —
+    // fetching a gzipped XMLTV file, decompressing it, and parsing it as
+    // XML (DOMParser is notably memory-hungry relative to the raw text
+    // size). Firing it in the exact same instant hls.js is standing up
+    // MediaSource and starting to buffer is stacking two unrelated heavy
+    // operations on top of each other right when a phone can least
+    // afford it. A short stagger on mobile lets playback startup get a
+    // clear run first.
+    if(window.innerWidth <= 640) setTimeout(()=> showGuideFor(ch), 400);
+    else showGuideFor(ch);
+
+    // An insecure http:// source will always be blocked on this https page,
+    // so skip straight to route 1 (proxied) instead of wasting an attempt.
+    // If a health check already found which route actually works for this
+    // channel, start there directly — this is exactly why a channel marked
+    // "reachable" could otherwise still fail to play: the check might
+    // succeed on route 2, but playback always restarted from route 0/1
+    // and re-discovered the same failures on the way there.
+    const isInsecure = window.location.protocol === 'https:' && /^http:\/\//i.test(ch.url);
+    const defaultStartRoute = isInsecure ? 1 : 0;
+    const hasCachedRoute = ch.checked === 'ok' && typeof ch.checkedRoute === 'number';
+    const startRoute = tryHomeRelay
+      ? HOME_RELAY_ROUTE_IDX
+      : hasCachedRoute
+        ? Math.max(ch.checkedRoute, defaultStartRoute)
+        : defaultStartRoute;
+    if(tryHomeRelay){
+      showToast(`"${ch.name}" needs your home relay — trying that now.`);
+    } else if(isInsecure && startRoute === defaultStartRoute && defaultStartRoute > 0){
+      showToast(`Routing "${ch.name}" through an HTTPS proxy (insecure source) — may be slower or less reliable.`);
+    }
+
+    if(hls){ hls.destroy(); hls = null; }
+    if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
+    video.removeAttribute('src'); video.load();
+
+    const isHlsSrc = /\.m3u8($|\?)/i.test(ch.url);
+    // Safari has native HLS support built into the <video> element — no
+    // hls.js needed at all. Preferred over hls.js whenever it's
+    // available, for two concrete reasons, not just "fewer moving
+    // parts": native playback runs through iOS's own hardware-optimized
+    // decode pipeline instead of JS-based demuxing into a MediaSource
+    // buffer, which is real memory/CPU overhead hls.js carries that
+    // native playback doesn't — plausibly relevant to the mobile crash
+    // reports earlier in this conversation. And AirPlay's device picker
+    // needs a genuine streamable URL to negotiate with a receiver
+    // properly; hls.js's MediaSource-backed video element isn't one,
+    // which is why "no devices found" happened even with a real AirPlay
+    // device on the network — confirmed, not just suspected.
+    const nativeHlsSupport = isHlsSrc && video.canPlayType && video.canPlayType('application/vnd.apple.mpegurl') !== '';
+    const useHls = isHlsSrc && !nativeHlsSupport && window.Hls && Hls.isSupported();
+    console.warn(`[diagnostic] engine selection for "${ch.name}":`, {
+      url: ch.url,
+      isHlsSrc,
+      nativeHlsSupport,
+      hlsLoaded: !!window.Hls,
+      hlsSupported: window.Hls ? Hls.isSupported() : 'Hls not loaded',
+      useHls,
+      chosenEngine: nativeHlsSupport ? 'startDirectPlayback (native)' : useHls ? 'startHlsPlayback' : 'startDirectPlayback (fallback)'
+    });
+    if(nativeHlsSupport){
+      startDirectPlayback(ch, token, startRoute);
+    } else if(useHls){
+      startHlsPlayback(ch, token, startRoute);
+    } else {
+      startDirectPlayback(ch, token, startRoute);
+    }
+
+    // Hedge against a slow route cascade: if this channel hasn't been
+    // health-checked yet, race "direct" against "your Worker" in the
+    // background while the eager attempt above is already underway. If
+    // the eager attempt hasn't succeeded by the time the race resolves
+    // and the race found a *different* working route, jump straight to
+    // it instead of waiting out however many more failed hops remain —
+    // this is what actually shortens "used to be instant, now slow" for
+    // a channel whose fast route just stopped working, without adding
+    // any latency to the common case where the eager attempt just works.
+    // Skipped on mobile: it's a speed nicety for an uncommon case, and
+    // firing extra concurrent network requests right at the exact moment
+    // hls.js is also starting up works against reducing peak load then.
+    if(!hasCachedRoute && MY_PROXY_URL && !tryHomeRelay && window.innerWidth > 640){
+      const candidates = [defaultStartRoute, PLAYBACK_ROUTES.findIndex((r,i)=> i>defaultStartRoute && ROUTE_LABELS[i]==='your Worker')].filter(i=>i>=0);
+      if(candidates.length > 1){
+        raceRoutes(ch, candidates).then(winner=>{
+          if(playbackToken !== token || playbackStarted || winner === null || winner === startRoute) return;
+          if(useHls) startHlsPlayback(ch, token, winner);
+          else startDirectPlayback(ch, token, winner);
+        });
+      }
+    }
+
+    // scroll active bubble into view
+    const activeBubble = rail.querySelector(`.bubble[data-idx="${idx}"]`);
+    if(activeBubble) activeBubble.scrollIntoView({behavior:'smooth', inline:'center', block:'nearest'});
+  }
+
+  el('prevBtn').addEventListener('click', ()=>{
+    if(filtered.length===0) return;
+    let idx = activeIndex <= 0 ? filtered.length-1 : activeIndex-1;
+    if(idx >= renderedCount) renderMore();
+    playChannel(idx);
+  });
+  el('nextBtn').addEventListener('click', ()=>{
+    if(filtered.length===0) return;
+    let idx = (activeIndex+1) % filtered.length;
+    while(idx >= renderedCount && renderedCount < filtered.length) renderMore();
+    playChannel(idx);
+  });
+
+  // ---------- Volume / mute ----------
+  let lastVolume = 1;
+  const VOL_ICON_NORMAL = '<path d="M4 9v6h4l5 5V4L8 9H4z" fill="currentColor"/><path d="M16 9a4 4 0 010 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M18.5 6.5a8 8 0 010 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>';
+  const VOL_ICON_MUTED  = '<path d="M4 9v6h4l5 5V4L8 9H4z" fill="currentColor"/><path d="M16.5 9.5l5 5M21.5 9.5l-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>';
+
+  function updateVolumeUI(){
+    const isMuted = video.muted || video.volume === 0;
+    volSlider.value = isMuted ? 0 : video.volume;
+    volSlider.classList.toggle('is-muted', isMuted);
+    muteBtn.classList.toggle('is-muted', isMuted);
+    muteBtn.title = isMuted ? 'Unmute' : 'Mute';
+    volIcon.innerHTML = isMuted ? VOL_ICON_MUTED : VOL_ICON_NORMAL;
+  }
+  video.addEventListener('volumechange', updateVolumeUI);
+  // Start muted — browsers require this for unattended autoplay anyway, and
+  // the mute button/slider reflect the muted state immediately on load.
+  video.muted = true;
+  updateVolumeUI();
+
+  volSlider.addEventListener('input', ()=>{
+    const v = Number(volSlider.value);
+    video.volume = v;
+    video.muted = v === 0;
+    if(v > 0) lastVolume = v;
+  });
+  muteBtn.addEventListener('click', ()=>{
+    const isMuted = video.muted || video.volume === 0;
+    if(isMuted){
+      video.muted = false;
+      video.volume = lastVolume > 0 ? lastVolume : 1;
+    } else {
+      lastVolume = video.volume || 1;
+      video.muted = true;
+    }
+  });
+
+  // ---------- Cast to a nearby device ----------
+  // Chromecast, properly: the Remote Playback API (video.remote.prompt())
+  // that used to be the only Chrome-side option here has notoriously
+  // inconsistent real-world Chromecast support — it's a lighter, less
+  // capable API than Google's own Cast SDK, and often just doesn't
+  // enumerate Chromecast devices reliably. This uses the actual Cast SDK
+  // instead, with Google's DEFAULT_MEDIA_RECEIVER_APP_ID — a built-in
+  // receiver that plays a given URL directly with no need to register a
+  // custom Cast Developer Console app for basic video casting like this.
+  //
+  // Crucially, casting hands the Chromecast device a raw URL to fetch
+  // ON ITS OWN — the browser tab isn't involved in playback at all once
+  // casting starts, so it needs a URL the Chromecast itself can reach
+  // with proper CORS/HTTPS, same requirement as this app's own playback
+  // routing. Routed through the Worker when configured for exactly that
+  // reason, rather than the channel's raw original URL.
+  let castContext = null;
+  function getCastContext(){
+    if(!window.__castApiAvailable || !window.chrome || !chrome.cast || !window.cast || !cast.framework) return null;
+    if(!castContext){
+      castContext = cast.framework.CastContext.getInstance();
+      castContext.setOptions({
+        receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+        autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+      });
+    }
+    return castContext;
+  }
+
+  async function castCurrentChannel(){
+    const ctx = getCastContext();
+    if(!ctx) return false;
+
+    const ch = activePlayingChannelId != null ? allChannels.find(c => c.id === activePlayingChannelId) : null;
+    if(!ch){
+      showToast('Pick a channel first, then cast it.');
+      return true; // handled — don't fall through to other cast methods
+    }
+
+    let session = ctx.getCurrentSession();
+    if(!session){
+      await ctx.requestSession();
+      session = ctx.getCurrentSession();
+    }
+    if(!session) return true; // user closed the device picker without choosing one — nothing else to try
+
+    const isHls = /\.m3u8($|\?)/i.test(ch.url);
+    // MY_PROXY_URL specifically (not codetabs/allorigins) — those are
+    // shared public proxies not really meant for a third-party device to
+    // hammer with the sustained traffic a casting session involves.
+    const castUrl = MY_PROXY_URL ? routedUrl(ch.url, PLAYBACK_ROUTES.findIndex((r,i)=> ROUTE_LABELS[i]==='your Worker')) : ch.url;
+
+    const mediaInfo = new chrome.cast.media.MediaInfo(castUrl, isHls ? 'application/x-mpegurl' : 'video/mp2t');
+    mediaInfo.streamType = chrome.cast.media.StreamType.LIVE;
+    mediaInfo.metadata = new chrome.cast.media.GenericMediaMetadata();
+    mediaInfo.metadata.title = ch.name;
+    if(ch.logo) mediaInfo.metadata.images = [new chrome.cast.Image(ch.logo)];
+
+    const request = new chrome.cast.media.LoadRequest(mediaInfo);
+    try{
+      await session.loadMedia(request);
+      showToast(`Casting "${ch.name}" to ${session.getCastDevice().friendlyName}.`);
+    }catch(e){
+      showToast('The Chromecast device could not load this channel.');
+    }
+    return true;
+  }
+
+  el('castBtn').addEventListener('click', async ()=>{
+    try{
+      if(await castCurrentChannel()) return;
+      if('remote' in video && video.remote && typeof video.remote.prompt === 'function'){
+        await video.remote.prompt();
+      } else if(typeof video.webkitShowPlaybackTargetPicker === 'function'){
+        video.webkitShowPlaybackTargetPicker();
+      } else {
+        showToast('Casting isn\'t supported in this browser.');
+      }
+    }catch(e){ showToast('No nearby devices found to cast to.'); }
+  });
+
+  el('pipBtn').addEventListener('click', async ()=>{
+    try{
+      if(document.pictureInPictureElement){
+        await document.exitPictureInPicture();
+      } else {
+        await video.requestPictureInPicture();
+      }
+    }catch(e){ showToast('Picture-in-picture not supported for this stream.'); }
+  });
+
+  el('fsBtn').addEventListener('click', ()=>{
+    // iOS Safari doesn't reliably support the standard Fullscreen API on
+    // an arbitrary wrapper element (playerFrame is a <div>) — it only
+    // supports fullscreen via this WebKit-specific method, and only on
+    // the <video> element itself. This is why fullscreen silently did
+    // nothing on iPhone/iPad despite working fine everywhere else:
+    // requestFullscreen() on playerFrame simply isn't implemented there.
+    if(typeof video.webkitEnterFullscreen === 'function' && !document.fullscreenElement){
+      try{ video.webkitEnterFullscreen(); return; }catch(e){ /* fall through to the standard API below */ }
+    }
+    if(document.fullscreenElement){
+      document.exitFullscreen();
+    } else {
+      playerFrame.requestFullscreen().catch(()=>{});
+    }
+  });
+
+  // ---------- Keep the TV Guide / logo box's bottom edge level with the
+  // player's. The player's height is driven by its 16:9 aspect-ratio
+  // against a fluid width, so it isn't knowable in CSS alone; measure it
+  // and set the sidebar box's height to fill the remaining space below
+  // the search/filter controls. Only applies to the side-by-side desktop
+  // layout — the 960px breakpoint above reverts to a fixed height once
+  // the columns stack. ----------
+  const sideCol = document.querySelector('.side-col');
+  const guideOrLogo = document.querySelector('.guide-or-logo');
+  let guideHeightRaf = null;
+  function syncGuideHeight(){
+    if(window.innerWidth <= 960){
+      // Skip the DOM write entirely if there's nothing to undo — on
+      // mobile this runs on every one of many rapid-fire resize events
+      // during ordinary scrolling (the address bar collapsing/expanding
+      // changes the viewport height each time), so avoiding an
+      // unnecessary style write here matters a lot more than it would
+      // on desktop, where this branch barely ever executes.
+      if(guideOrLogo.style.height !== '') guideOrLogo.style.height = '';
+      return;
+    }
+    const playerH = playerFrame.getBoundingClientRect().height;
+    let siblingsH = 0;
+    for(const child of sideCol.children){
+      if(child !== guideOrLogo) siblingsH += child.getBoundingClientRect().height;
+    }
+    const gapPx = parseFloat(getComputedStyle(sideCol).gap) || 0;
+    const gapCount = sideCol.children.length - 1;
+    const available = playerH - siblingsH - (gapPx * gapCount);
+    guideOrLogo.style.height = Math.max(180, available) + 'px';
+  }
+  // Coalesces bursts of resize/ResizeObserver events (mobile scrolling
+  // can fire the resize event dozens of times a second via the address
+  // bar collapsing/expanding) down to at most once per animation frame,
+  // instead of doing a full layout-read/style-write for every single
+  // one — the difference between smooth scrolling and a frozen page on
+  // lower-end mobile hardware.
+  function scheduleSyncGuideHeight(){
+    if(guideHeightRaf !== null) return;
+    guideHeightRaf = requestAnimationFrame(()=>{
+      guideHeightRaf = null;
+      syncGuideHeight();
+    });
+  }
+  new ResizeObserver(scheduleSyncGuideHeight).observe(playerFrame);
+  window.addEventListener('resize', scheduleSyncGuideHeight);
+  syncGuideHeight();
+
+  // ---------- Show/hide player controls ----------
+  // Desktop: pure CSS :hover in the stylesheet above — controls are visible
+  // exactly while the pointer is over the video and hidden the instant it
+  // leaves, nothing else. Touch has no hover concept, so tapping (or
+  // starting a new channel) reveals them for a few seconds instead.
+  let touchControlsTimer = null;
+  function showControls(){
+    if(controls.style.display === 'none') return;
+    playerFrame.classList.add('force-controls');
+    clearTimeout(touchControlsTimer);
+    touchControlsTimer = setTimeout(()=> playerFrame.classList.remove('force-controls'), 3000);
+  }
+  playerFrame.addEventListener('touchstart', showControls, {passive:true});
+
+  // ---------- Reset Country / Category / Language / Search ----------
+  resetFiltersBtn.addEventListener('click', ()=>{
+    countrySel.value = '';
+    categorySel.value = '';
+    languageSel.value = '';
+    searchInput.value = '';
+    refreshFilters();
+  });
+
+  // ---------- TV Guide: optional, toggle between guide content and a
+  // plain channel logo within the same fixed-size box — the sidebar's own
+  // width/position never changes, only what's shown inside guide-or-logo. ----------
+  function updateGuideVisibility(){
+    const showGuide = guideToggle.checked;
+    guideInner.style.display = showGuide ? 'flex' : 'none';
+    logoDisplay.style.display = showGuide ? 'none' : 'flex';
+  }
+  guideToggle.addEventListener('change', updateGuideVisibility);
+  updateGuideVisibility();
+
+  // ---------- "Try an example" — jumps straight to a channel that's
+  // widely mirrored and reliably has guide data, so the TV Guide panel
+  // has something to show immediately. ----------
+  function tryExampleChannel(){
+    if(!allChannels.length){
+      showToast('Still loading the channel list — try again in a moment.');
+      return;
+    }
+    const ch = allChannels.find(c => /france\s*24/i.test(c.name));
+    if(!ch){
+      showToast('Example channel not found in this playlist right now.');
+      return;
+    }
+    countrySel.value = '';
+    categorySel.value = '';
+    languageSel.value = '';
+    searchInput.value = '';
+    refreshFilters();
+    const idx = filtered.indexOf(ch);
+    if(idx === -1){
+      showToast('Example channel not found in this playlist right now.');
+      return;
+    }
+    while(idx >= renderedCount && renderedCount < filtered.length) renderMore();
+    playChannel(idx);
+  }
+  document.addEventListener('click', (e)=>{
+    if(e.target && e.target.id === 'tryExampleBtn') tryExampleChannel();
+  });
+
+  // ---------- Channel source picker ----------
+
+  // Minimal CSV field splitter — handles simple quoted fields with escaped
+  // "" quotes. Sourcelist.csv only ever needs two plain columns (Name,Link)
+  // so a full RFC 4180 parser would be overkill here.
+  function splitCsvLine(line){
+    const out = [];
+    let cur = '', inQuotes = false;
+    for(let i=0; i<line.length; i++){
+      const c = line[i];
+      if(inQuotes){
+        if(c === '"'){
+          if(line[i+1] === '"'){ cur += '"'; i++; }
+          else inQuotes = false;
+        } else cur += c;
+      } else {
+        if(c === '"') inQuotes = true;
+        else if(c === ','){ out.push(cur); cur = ''; }
+        else cur += c;
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
+  function parseSourceListCSV(text){
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length);
+    if(!lines.length) return [];
+    const startIdx = /^\s*name\s*,/i.test(lines[0]) ? 1 : 0; // skip a "Name,Link" header row if present
+    const rows = [];
+    for(let i=startIdx; i<lines.length; i++){
+      const parts = splitCsvLine(lines[i]);
+      if(parts.length < 2) continue;
+      const name = (parts[0] || '').trim();
+      const url = (parts[1] || '').trim();
+      if(name && /^https?:\/\//i.test(url)) rows.push({name, url});
+    }
+    return rows;
+  }
+
+  // Gives any raw.githubusercontent.com entry (like the India row) the
+  // same jsdelivr-mirror reliability boost SOURCES.main already had
+  // hardcoded, automatically — no need to hand-specify a second URL per
+  // row in the CSV. iptv-org's own GitHub Pages index gets its known
+  // jsdelivr mirror too. Anything else just loads as the single URL given.
+  function fallbackUrlsFor(url){
+    if(url === 'https://iptv-org.github.io/iptv/index.m3u') return SOURCES.main;
+    const m = url.match(/^https:\/\/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/(?:refs\/heads\/)?([^\/]+)\/(.+)$/i);
+    if(m){
+      const [, owner, repo, branch, path] = m;
+      return [url, `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${branch}/${path}`];
+    }
+    return [url];
+  }
+
+  let sourceList = SOURCE_LIST_FALLBACK;
+
+  async function loadSourceList(){
+    try{
+      const res = await fetch(SOURCE_LIST_CSV_URL);
+      if(!res.ok) throw new Error('bad status');
+      const rows = parseSourceListCSV(await res.text());
+      if(rows.length) sourceList = rows;
+    }catch(e){
+      // Sourcelist.csv not uploaded yet, or unreachable — SOURCE_LIST_FALLBACK
+      // keeps the picker (and the app) functional either way.
+    }
+    sourcePreset.querySelectorAll('option[data-csv]').forEach(o => o.remove());
+    const customOpt = sourcePreset.querySelector('option[value="custom"]');
+    sourceList.forEach((row, i)=>{
+      const o = document.createElement('option');
+      o.value = String(i);
+      o.dataset.csv = '1';
+      o.textContent = row.name;
+      sourcePreset.insertBefore(o, customOpt);
+    });
+  }
+
+  sourceBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const opening = sourcePanel.style.display === 'none';
+    sourcePanel.style.display = opening ? 'flex' : 'none';
+    sourceBtn.classList.toggle('is-open', opening);
+  });
+  document.addEventListener('click', (e)=>{
+    if(sourcePanel.style.display !== 'none' && !sourcePanel.contains(e.target) && e.target !== sourceBtn){
+      sourcePanel.style.display = 'none';
+      sourceBtn.classList.remove('is-open');
+    }
+  });
+  sourcePreset.addEventListener('change', ()=>{
+    sourceCustomUrl.style.display = sourcePreset.value === 'custom' ? '' : 'none';
+  });
+
+  // A source counts as the default/"iptv" kind (curated order, no forced
+  // sort — see applyFilters) only when it's literally iptv-org's own
+  // index.m3u — matched by URL, not name, so a CSV row can be renamed
+  // freely without silently losing this behavior.
+  const DEFAULT_SOURCE_URL = 'https://iptv-org.github.io/iptv/index.m3u';
+
+  function currentSourceLabel(saved){
+    return saved.type === 'custom' ? saved.url : saved.name;
+  }
+
+  async function applySource(saved){
+    const urls = saved.type === 'custom' ? [saved.url] : fallbackUrlsFor(saved.url);
+    sourcePanelNote.textContent = 'Loading…';
+    railStatus.innerHTML = `Loading channels from ${currentSourceLabel(saved)}…`;
+    await loadPlaylist(urls, false, saved.name);
+    sourcePanelNote.textContent = `Current: ${currentSourceLabel(saved)}`;
+    try{ localStorage.setItem(SOURCE_STORAGE_KEY, JSON.stringify(saved)); }catch(e){ /* storage unavailable — selection just won't persist */ }
+    // Loading is done and the rail already shows the new list — nothing
+    // left for the panel to do, so close it automatically instead of
+    // making the person dismiss it themselves every time.
+    sourcePanel.style.display = 'none';
+    sourceBtn.classList.remove('is-open');
+  }
+
+  sourceLoadBtn.addEventListener('click', async ()=>{
+    let saved;
+    if(sourcePreset.value === 'custom'){
+      const url = sourceCustomUrl.value.trim();
+      if(!/^https?:\/\//i.test(url)){
+        showToast('Enter a valid http(s) playlist URL first.');
+        return;
+      }
+      saved = {type:'custom', name: url, url};
+    } else {
+      const row = sourceList[Number(sourcePreset.value)];
+      if(!row) return;
+      saved = {type:'preset', name: row.name, url: row.url};
+    }
+    await applySource(saved);
+  });
+
+  // Restores whatever source was last selected, so switching sources
+  // sticks across page reloads instead of silently reverting to the
+  // default every time. Matched by URL (not array position, which shifts
+  // whenever Sourcelist.csv is edited) so a saved selection survives
+  // reordering — only an actually-removed/renamed-with-a-different-URL
+  // row falls back to default.
+  function loadSavedSourceOrDefault(){
+    let saved = null;
+    try{
+      const raw = localStorage.getItem(SOURCE_STORAGE_KEY);
+      if(raw) saved = JSON.parse(raw);
+    }catch(e){ /* corrupt/unavailable storage — fall through to default */ }
+
+    if(saved && saved.type === 'custom' && /^https?:\/\//i.test(saved.url || '')){
+      sourcePreset.value = 'custom';
+      sourceCustomUrl.value = saved.url;
+      sourceCustomUrl.style.display = '';
+      sourcePanelNote.textContent = `Current: ${currentSourceLabel(saved)}`;
+      loadPlaylist([saved.url], true, saved.name);
+      return;
+    }
+    if(saved && saved.type === 'preset'){
+      const idx = sourceList.findIndex(r => r.url === saved.url);
+      if(idx !== -1){
+        sourcePreset.value = String(idx);
+        sourcePanelNote.textContent = `Current: ${currentSourceLabel(saved)}`;
+        loadPlaylist(fallbackUrlsFor(saved.url), true, saved.name);
+        return;
+      }
+    }
+    const defaultRow = sourceList.find(r => r.url === DEFAULT_SOURCE_URL) || sourceList[0];
+    if(defaultRow){
+      const idx = sourceList.indexOf(defaultRow);
+      sourcePreset.value = String(idx);
+      sourcePanelNote.textContent = `Current: ${defaultRow.name}`;
+      loadPlaylist(fallbackUrlsFor(defaultRow.url), true, defaultRow.name);
+    } else {
+      loadPlaylist();
+    }
+  }
+
+  (async function bootstrapSources(){
+    await loadSourceList();
+    loadSavedSourceOrDefault();
+  })();
+})();
+</script>
+</body>
+</html>
