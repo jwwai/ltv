@@ -298,27 +298,6 @@ export default {
         });
       }
 
-      // Channel-list files (like an apsattv.com/iptv-org playlist of
-      // hundreds of separate channels) match the same .m3u/.m3u8
-      // extension pattern as a genuine HLS streaming manifest, but they
-      // are NOT the same kind of file — rewritePlaylist's job is
-      // resolving relative SEGMENT URIs within one HLS stream, which
-      // makes no sense applied to a directory of unrelated channels.
-      // Real HLS manifests (master or media) always carry at least one
-      // #EXT-X- tag; a channel list never does — checking for that is
-      // enough to tell the two apart and only rewrite the one that
-      // actually needs it.
-      const isActualHlsManifest = /#EXT-X-/.test(playlistText);
-      if (!isActualHlsManifest) {
-        headers.delete('content-length');
-        headers.delete('content-encoding');
-        return new Response(playlistText, {
-          status: upstream.status,
-          statusText: upstream.statusText,
-          headers,
-        });
-      }
-
       const rewritten = rewritePlaylist(playlistText, targetUrl, reqUrl.origin);
       headers.set('Content-Type', 'application/vnd.apple.mpegurl');
       headers.delete('content-length'); // length changed after rewriting

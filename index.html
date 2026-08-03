@@ -1071,38 +1071,6 @@
     return /mozilla\/|applewebkit|gecko\)|chrome\/\d|safari\/\d|like gecko/i.test(name);
   }
 
-  // Fallback category inference for sources with no (or poor) group-title
-  // tagging — apsattv.com and similar minimalist aggregators are
-  // documented by independent reviewers as having "categories not well
-  // organized," so there's genuinely nothing to parse out of their own
-  // metadata in many cases. This is a heuristic guess from the channel
-  // NAME itself, not a substitute for real source data — it'll never be
-  // as accurate as a properly-tagged list, and only ever runs when
-  // group-title is truly absent (checked at the call site below), so a
-  // well-tagged source like iptv-org's own list is completely unaffected.
-  // Ordered roughly most-to-least distinctive to reduce false matches
-  // from a generic later keyword (e.g. "news" matching a channel that's
-  // actually named "Newsmax Kids" — unlikely in practice, but checking
-  // more specific categories first costs nothing and helps at the margin).
-  const CATEGORY_KEYWORDS = [
-    ['Kids', ['kids','cartoon','nickelodeon','nick jr','disney','boomerang','pbs kids','junior','toon']],
-    ['News', ['news','cnn','msnbc','newsmax','al jazeera','bloomberg','euronews','weather channel','oan']],
-    ['Sports', ['sport','espn','fox sports','nba','nfl','nhl','mlb','golf channel','tennis','motorsport','ufc tv','wwe','boxing','cricket','fifa','olympics','racing']],
-    ['Movies', ['movie','cinema','film4','hbo','showtime','starz','cinemax',' amc ','tcm']],
-    ['Documentary', ['discovery','documentary','history channel','nat geo','national geographic','animal planet','science channel']],
-    ['Music', ['music tv','mtv','vh1','vevo','hits radio','concert']],
-    ['Religious', ['faith','gospel','christian','catholic','tbn','ewtn']],
-    ['Shopping', ['shopping','qvc','hsn']],
-    ['Entertainment', ['comedy central','entertainment','lifetime','bravo',' e! ','tlc']],
-  ];
-  function inferCategoryFromName(name){
-    const lower = ` ${name.toLowerCase()} `;
-    for(const [category, keywords] of CATEGORY_KEYWORDS){
-      if(keywords.some(kw => lower.includes(kw))) return category;
-    }
-    return null;
-  }
-
   async function parseM3U(text, fallbackCategory){
     const out = [];
     let cur = null;
@@ -1150,13 +1118,12 @@
           // Some sources (apsattv.com and similar minimalist, native-
           // app-oriented aggregators) provide no group-title at all — a
           // generic "General" bucket for every single channel from such
-          // a source is useless for filtering. Tries a name-based guess
-          // first (e.g. "ESPN" -> Sports) since that's more specific and
-          // useful when it hits; falls back to the source's own name
-          // (still better than nothing) and only then to "General". Only
-          // ever runs when group-title is truly absent, so sources that
-          // DO provide it (iptv-org's own list) are unaffected.
-          category: attrs['group-title'] || inferCategoryFromName(name) || fallbackCategory || 'General',
+          // a source is useless for filtering. Falling back to the
+          // source's own name at least reflects something real and
+          // distinguishing; only actually used when group-title is truly
+          // absent, so sources that DO provide it (iptv-org's own list)
+          // are unaffected.
+          category: attrs['group-title'] || fallbackCategory || 'General',
           url: ''
         };
       } else if(!line.startsWith('#')){
@@ -2056,7 +2023,6 @@
 
   // log the real reason and step to the next route before giving up.
   function startHlsPlayback(ch, token, routeIdx){
-    console.warn(`[diagnostic] startHlsPlayback entered for "${ch.name}" via route ${routeIdx}`);
     if(hls){ hls.destroy(); hls = null; }
     if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
     // Smaller buffer targets on mobile — 30s of forward+back buffer is a
@@ -2066,14 +2032,6 @@
     // added peak right at the exact moment playback starts.
     const isMobile = window.innerWidth <= 640;
     hls = new Hls({
-      // Runs TS demuxing in a separate Web Worker thread instead of the
-      // main one — the main thread is exactly what's been fought for
-      // throughout this app (list rendering, EPG parsing, UI
-      // responsiveness), so keeping decode-adjacent work off it matters
-      // more here than in a simpler page. hls.js defaults this to true,
-      // but pinning it explicitly means it stays true regardless of any
-      // future hls.js version changing that default.
-      enableWorker: true,
       maxBufferLength: isMobile ? 15 : 30,
       // Trims already-played buffer so memory usage stays flat over a long
       // live session instead of growing unbounded — a common source of
@@ -2121,49 +2079,7 @@
       }
     });
     hls.loadSource(ch.url);
-    // Diagnostic only — logs what hls.js actually detected about this
-    // stream's tracks once the manifest parses. The codec-rejection
-    // theory (bufferAddCodecError etc, listened for above) turned out
-    // not to be firing for the reported black-screen-with-audio case,
-    // which means the real cause is something this log is meant to
-    // reveal rather than another guess: if hasVideo is false here, hls.js
-    // never found a video track in the stream at all (a demuxing/PMT
-    // issue with the source itself, not a codec hls.js is rejecting);
-    // if hasVideo is true, the track exists and is presumably decoding,
-    // pointing instead at a rendering-layer issue (GPU/driver) that
-    // wouldn't throw any hls.js error either way.
-    hls.on(Hls.Events.MANIFEST_PARSED, (evt, data)=>{
-      if(token !== playbackToken) return;
-      const level = data.levels && data.levels[data.firstLevel];
-      console.warn(`[diagnostic] "${ch.name}" manifest parsed:`, {
-        hasVideo: level && level.videoCodec !== undefined,
-        videoCodec: level && level.videoCodec,
-        audioCodec: level && level.audioCodec,
-        width: level && level.width,
-        height: level && level.height,
-      });
-    });
     hls.attachMedia(video);
-    // hls.js treats an unsupported VIDEO codec as non-fatal whenever the
-    // AUDIO codec still decodes fine — it just keeps playing audio and
-    // silently drops video, since from hls.js's point of view playback
-    // hasn't actually stopped. That's exactly why this showed as a
-    // silent black screen with sound instead of any visible error: the
-    // main handler below only ever reacts to data.fatal. No in-browser
-    // fallback fixes this either — mpegts.js and native HLS both depend
-    // on the same underlying browser/OS decoder, so if it can't decode
-    // this video codec (commonly HEVC/H.265, which most desktop browsers
-    // don't support in MSE), none of them will. VLC bundles its own
-    // software decoders and handles virtually anything, which is why
-    // that's the actual fix here rather than another in-app retry.
-    hls.on(Hls.Events.ERROR, (evt, data)=>{
-      if(token !== playbackToken || data.fatal) return;
-      const codecIssue = data.details === 'bufferAddCodecError' || data.details === 'bufferIncompatibleCodecsError';
-      if(!codecIssue) return;
-      console.warn(`Video codec not supported for "${ch.name}":`, data.details, data.mimeType || '');
-      showToast(`"${ch.name}" uses a video format this browser can't decode (audio-only). Tap the VLC button to watch it there.`);
-      markChannelUnplayable(ch, `Video codec not supported in this browser — open in VLC instead`);
-    });
     hls.on(Hls.Events.ERROR, (evt, data)=>{
       if(token !== playbackToken || !data.fatal) return;
       console.warn(`Playback failed for "${ch.name}" via route ${routeIdx}:`, data.type, data.details, data.response || '');
@@ -2194,7 +2110,6 @@
   // route (rather than only after exhausting all of them) is what
   // actually recovers these channels instead of just failing faster.
   function startMpegtsPlayback(ch, token, routeIdx, onFail){
-    console.warn(`[diagnostic] startMpegtsPlayback entered for "${ch.name}" via route ${routeIdx}`);
     if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
     if(hls){ hls.destroy(); hls = null; }
     if(!window.mpegts || !mpegts.getFeatureList().mseLivePlayback){ onFail(); return; }
@@ -2220,7 +2135,6 @@
   }
 
   function startDirectPlayback(ch, token, routeIdx){
-    console.warn(`[diagnostic] startDirectPlayback entered for "${ch.name}" via route ${routeIdx}, url:`, routedUrl(ch.url, routeIdx));
     const tryNextRoute = () => {
       if(routeIdx < PLAYBACK_ROUTES.length - 1){
         showToast(`"${ch.name}" was blocked — trying another route…`);
@@ -2384,15 +2298,6 @@
     // device on the network — confirmed, not just suspected.
     const nativeHlsSupport = isHlsSrc && video.canPlayType && video.canPlayType('application/vnd.apple.mpegurl') !== '';
     const useHls = isHlsSrc && !nativeHlsSupport && window.Hls && Hls.isSupported();
-    console.warn(`[diagnostic] engine selection for "${ch.name}":`, {
-      url: ch.url,
-      isHlsSrc,
-      nativeHlsSupport,
-      hlsLoaded: !!window.Hls,
-      hlsSupported: window.Hls ? Hls.isSupported() : 'Hls not loaded',
-      useHls,
-      chosenEngine: nativeHlsSupport ? 'startDirectPlayback (native)' : useHls ? 'startHlsPlayback' : 'startDirectPlayback (fallback)'
-    });
     if(nativeHlsSupport){
       startDirectPlayback(ch, token, startRoute);
     } else if(useHls){
