@@ -1025,6 +1025,22 @@
     guidePanel.innerHTML = html;
   }
 
+  // showGuideFor is the expensive part (fetch + gzip decompress + full
+  // DOMParser XML parse of a whole country's XMLTV feed — multiple MB of
+  // DOM for a single guide lookup). It used to run on EVERY channel
+  // switch unconditionally, even when the "TV Guide" toggle was off and
+  // nothing would even display it — meaning that heavy parse was the real
+  // cost hitting right around ~5s into playback on mobile (staggered by
+  // 400ms below, then several more seconds to fetch/decompress/parse),
+  // independent of which video-playback path (hls.js vs mpegts.js) was in
+  // use. Gating it on the toggle means it only ever runs when the panel
+  // is actually going to show something.
+  function maybeShowGuide(ch){
+    guideChannel = ch;
+    if(!guideToggle.checked) return;
+    showGuideFor(ch);
+  }
+
   async function showGuideFor(ch){
     guideChannel = ch;
     guideList = null;
@@ -2225,7 +2241,7 @@
         activePlayingChannelId = ch.id;
         markActiveBubble();
         playbackToken++;
-        showGuideFor(ch);
+        maybeShowGuide(ch);
         showToast(`"${ch.name}" ${capability.reason}. Tap the VLC button to open it there.`);
         markChannelUnplayable(ch, `${capability.reason} — open in VLC instead`);
         return;
@@ -2271,8 +2287,8 @@
     // operations on top of each other right when a phone can least
     // afford it. A short stagger on mobile lets playback startup get a
     // clear run first.
-    if(window.innerWidth <= 640) setTimeout(()=> showGuideFor(ch), 400);
-    else showGuideFor(ch);
+    if(window.innerWidth <= 640) setTimeout(()=> maybeShowGuide(ch), 400);
+    else maybeShowGuide(ch);
 
     // An insecure http:// source will always be blocked on this https page,
     // so skip straight to route 1 (proxied) instead of wasting an attempt.
@@ -2586,7 +2602,13 @@
     guideInner.style.display = showGuide ? 'flex' : 'none';
     logoDisplay.style.display = showGuide ? 'none' : 'flex';
   }
-  guideToggle.addEventListener('change', updateGuideVisibility);
+  guideToggle.addEventListener('change', ()=>{
+    updateGuideVisibility();
+    // guideChannel is kept up to date by maybeShowGuide() even while the
+    // toggle is off, so this is always the actual current/last-selected
+    // channel — fetch its guide now that there's somewhere to show it.
+    if(guideToggle.checked && guideChannel && !guideList) showGuideFor(guideChannel);
+  });
   updateGuideVisibility();
 
   // ---------- "Try an example" — jumps straight to a channel that's
