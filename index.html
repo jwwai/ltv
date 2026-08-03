@@ -2114,12 +2114,28 @@
     if(hls){ hls.destroy(); hls = null; }
     if(!window.mpegts || !mpegts.getFeatureList().mseLivePlayback){ onFail(); return; }
     video.removeAttribute('src'); video.load();
+    // mpegts.js does NOT trim its SourceBuffer for live streams unless
+    // told to — left at its defaults it just keeps appending forever, so
+    // over a long-running channel (or even within seconds, on a fast/high-
+    // bitrate raw-TS source) memory grows unbounded until iOS Safari kills
+    // the tab's process and silently reloads the page, resetting all app
+    // state. That's the same class of mobile OOM already mitigated for
+    // hls.js above (maxBufferLength/backBufferLength) — mpegts.js needs
+    // its own equivalent since it doesn't share hls.js's buffer config.
+    const isMobile = window.innerWidth <= 640;
     mpegtsPlayer = mpegts.createPlayer({
       type: 'mpegts',
       isLive: true,
       url: routedUrl(ch.url, routeIdx)
     }, {
-      liveBufferLatencyChasing: true
+      liveBufferLatencyChasing: true,
+      autoCleanupSourceBuffer: true,
+      autoCleanupMaxBackwardDuration: isMobile ? 15 : 30,
+      autoCleanupMinBackwardDuration: isMobile ? 8 : 15,
+      // Smaller pre-decode stash on mobile — same reasoning as hls.js's
+      // reduced maxBufferLength: less memory allocated right at the exact
+      // moment decode/MediaSource setup is also happening.
+      stashInitialSize: isMobile ? 128 : undefined
     });
     mpegtsPlayer.attachMediaElement(video);
     mpegtsPlayer.on(mpegts.Events.ERROR, ()=>{
