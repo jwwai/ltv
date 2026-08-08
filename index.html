@@ -2026,6 +2026,41 @@
     }
   }
 
+  // ---------- Recovering from a genuinely broken stream ----------
+  // Every route can fail for two very different reasons: OUR routing is
+  // bad (a proxy is down, an IP block, etc — the route cascade already
+  // handles that), or the SOURCE ITSELF is degraded right now — a stream
+  // glitch severe enough that even VLC (which has no CORS/proxy concerns
+  // at all, it just opens the URL directly) struggles with it too. The
+  // old behavior treated both identically: exhaust every route once, mark
+  // the channel unplayable, and stop — permanently, until the person
+  // manually re-clicks it. For the second case that's needlessly final:
+  // a source hiccup that also affects VLC is very likely transient, and
+  // will often have cleared up again within a few tens of seconds. This
+  // gives a channel a couple of automatic, delayed, full-cascade retries
+  // before genuinely giving up — long enough to actually help with a
+  // real transient glitch, bounded so a permanently dead channel doesn't
+  // retry forever.
+  const MAX_AUTO_FULL_RETRIES = 2;
+  const AUTO_RETRY_BASE_DELAY = 15000; // 15s, then 30s
+  function handleRouteExhaustion(ch, token, failureReason){
+    markChannelUnplayable(ch, failureReason);
+    const attempt = (ch._autoRetryCount || 0) + 1;
+    if(attempt > MAX_AUTO_FULL_RETRIES){
+      showToast(`"${ch.name}" still isn't responding after a few tries — try the VLC button, the stream itself may be temporarily down.`);
+      return;
+    }
+    ch._autoRetryCount = attempt;
+    const delay = AUTO_RETRY_BASE_DELAY * attempt;
+    showToast(`"${ch.name}" isn't responding right now — retrying automatically in ${Math.round(delay/1000)}s (or try the VLC button).`);
+    setTimeout(()=>{
+      if(playbackToken !== token) return; // person moved on to something else since — don't hijack whatever's playing now
+      const freshIdx = filtered.findIndex(c => c.id === ch.id); // re-locate by id — filters/rail rebuilds can renumber the original index by now
+      if(freshIdx === -1) return; // filtered out since — nothing to jump back to
+      playChannel(freshIdx);
+    }, delay);
+  }
+
   // ---------- Stream protocol capability ----------
   // A proxy changes *transport* (adds HTTPS, adds CORS headers) — it can't
   // change *protocol*. RTSP/RTMP/UDP/RTP/MMS are stateful streaming
@@ -2440,8 +2475,7 @@
         startHlsPlayback(ch, token, routeIdx + 1);
         return;
       }
-      showToast(`"${ch.name}" isn't responding right now — try the VLC button.`);
-      markChannelUnplayable(ch, `Failed during playback (${data.details || data.type || 'fatal error'})`);
+      handleRouteExhaustion(ch, token, `Failed during playback (${data.details || data.type || 'fatal error'})`);
     });
     video.play().catch(()=>{});
   }
@@ -2535,8 +2569,7 @@
         showToast(`"${ch.name}" was blocked — trying another route…`);
         startDirectPlayback(ch, token, routeIdx + 1);
       } else {
-        showToast(`"${ch.name}" isn't responding right now — try the VLC button.`);
-        markChannelUnplayable(ch, 'Failed during playback');
+        handleRouteExhaustion(ch, token, 'Failed during playback');
       }
     };
     if(pendingLoadedMetadataHandler){
@@ -2581,6 +2614,13 @@
       showToast(`"${ch.name}" doesn't have a usable stream link.`);
       return;
     }
+    // A genuinely NEW channel selection (as opposed to an internal retry
+    // replaying this same channel — a route hop, the stall watchdog, or
+    // handleRouteExhaustion's own delayed retry below) resets the
+    // exhaustion-retry budget. Without this, a channel that used up its
+    // auto-retries once would stay "used up" forever, even hours later on
+    // a completely fresh attempt.
+    if(activePlayingChannelId !== ch.id) ch._autoRetryCount = 0;
 
     const capability = streamCapability(ch.url);
     if(!capability.scheme || (capability.scheme !== 'http' && capability.scheme !== 'https' && capability.playable)){
@@ -2634,15 +2674,34 @@
         markChannelUnplayable(ch, `${capability.reason} — open in VLC instead`);
         return;
       }
-      // Blocked-host case with no relay available: this IS a normal
-      // http(s) URL, so — unlike the protocol case above — a real
-      // attempt through the usual route cascade is meaningful and worth
-      // actually trying, rather than pre-judging it as dead purely from
-      // the hostname. Falls through to the normal playback path below;
-      // if every route genuinely fails, the existing cascade-exhaustion
-      // handling in startHlsPlayback/startDirectPlayback shows the
-      // failure (now mentioning the VLC button too) exactly like any
-      // other channel that doesn't work.
+      // Blocked-host case: if a home relay is configured, fall through to
+      // the normal playback path below — tryHomeRelay routes it there
+      // directly (see startRoute below), since that relay is confirmed to
+      // actually get past this specific block. With NO relay configured,
+      // though, fast-fail here exactly like the protocol case above,
+      // rather than running the full route cascade anyway. This is NOT a
+      // "maybe it'll work" situation: HOME-RELAY-README.md documents this
+      // as directly confirmed, not guessed — a fetch to one of these hosts
+      // from an entirely separate cloud network came back an explicit
+      // "blocked — bot detection", and direct/your Worker/corsfix/
+      // codetabs/allorigins all run from datacenter IPs and hit the
+      // identical wall regardless of headers or signatures sent — no
+      // proxy changes what IP range a request originates from. Running
+      // the full route cascade anyway (the previous behavior here) meant
+      // paying every route's full timeout, one after another, on a
+      // channel already known to fail all of them identically — this is
+      // very likely the real cause behind specific channels (Pluto-
+      // sourced ones especially) taking a long time to even start
+      // failing before the VLC fallback finally showed up.
+      if(!tryHomeRelay){
+        setActiveChannel(ch, idx);
+        markActiveBubble();
+        playbackToken++;
+        maybeShowGuide(ch);
+        showToast(`"${ch.name}" ${capability.reason}. Tap the VLC button to open it there.`);
+        markChannelUnplayable(ch, `${capability.reason} — open in VLC instead`);
+        return;
+      }
     }
 
     setActiveChannel(ch, idx);
