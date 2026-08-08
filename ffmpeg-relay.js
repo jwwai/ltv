@@ -58,10 +58,36 @@ const { URL } = require('url');
 // in the app becomes "00s-replay" here. Get this right and the app
 // finds and plays it automatically for any channel it already knows is
 // otherwise unplayable — no per-channel wiring needed beyond this array.
+//
+// `transcode: true` (optional, default false/remux) — for a source whose
+// VIDEO codec a browser can't decode at all, most commonly HEVC/H.265.
+// VLC bundles its own software decoder for virtually every codec, which
+// is why a channel like this plays fine there but shows no video (often
+// with audio still playing) in the browser — no proxy or route fix can
+// ever touch that, since it's a decode-pipeline limitation, not a
+// networking one. Set this and the video gets genuinely re-encoded to
+// H.264 (audio is left alone with -c:a copy — a codec problem here
+// specifically means the VIDEO track, not the audio, which already
+// decodes fine as-is). This is real, continuous CPU cost, unlike the
+// near-free -c copy remux every other entry below uses — fine for a
+// couple of channels on a Pi 4/5 or a modest PC, but don't flip this on
+// broadly without checking your hardware keeps up.
 const CHANNELS = [
   // --- HTTP(S) source blocked by IP-reputation (jmp2.uk/Pluto etc) ---
   { name: '00s-replay', url: 'https://jmp2.uk/plu-62ba60f059624e000781c436.m3u8' },
   // { name: '70s-cinema', url: 'https://jmp2.uk/plu-5f4d878d3d19b30007d2e782.m3u8' },
+
+  // --- HEVC/H.265 video — needs re-encoding to H.264, not just remuxing,
+  //     to actually show video in a browser. Confirmed: plays fine in
+  //     VLC, audio-only/no-video in the browser via hls.js — the exact
+  //     signature of an undecodable video codec. The channel name below
+  //     must match this app's exact display name for this source
+  //     ("Sony Entertainment Channel") once slugified — double-check
+  //     against what's actually shown in the app if this doesn't
+  //     auto-match; playlist sources sometimes label it slightly
+  //     differently (e.g. "Sony Entertainment Channel HD", "SET HD"). ---
+  { name: 'sony-entertainment-channel', url: 'http://38.96.178.205/SONYHD/index.m3u8', transcode: true },
+  { url: 'http://38.96.178.205/SONYHD/index.m3u8', transcode: true },
 
   // --- RTSP/RTMP/UDP sources — no browser can EVER play these directly,
   //     with or without a proxy (no browser networking API speaks any of
@@ -129,10 +155,34 @@ function inputFlagsFor(url){
   return [];
 }
 
-// One persistent ffmpeg process per channel, remuxing (not re-encoding —
-// `-c copy` just repackages the existing H.264/AAC into HLS segments,
-// which is why this costs almost no CPU for an already-compatible
-// source) into a rolling window of .ts segments + a live index.m3u8.
+// One persistent ffmpeg process per channel. For an already-compatible
+// source this remuxes (`-c copy` — just repackages the existing H.264/AAC
+// into HLS segments, near-zero CPU). For a channel marked
+// `transcode: true` (see CHANNELS above), the video track is genuinely
+// re-encoded to H.264 instead — real, continuous CPU cost, but the only
+// thing that actually turns an undecodable codec (HEVC/H.265, typically)
+// into something a browser can show.
+function codecArgsFor(channel) {
+  if (!channel.transcode) return ['-c', 'copy'];
+  return [
+    // Audio is left alone — a channel needing `transcode: true` means the
+    // VIDEO codec is the problem (the browser plays its audio fine as-is
+    // in every real case seen so far), so re-encoding audio too would
+    // just be wasted CPU for no benefit.
+    '-c:v', 'libx264',
+    '-preset', 'veryfast', // has to keep up with a continuous live source in real time — a slower preset falls behind and the stream drifts/stalls
+    '-tune', 'zerolatency',
+    '-crf', '23',          // reasonable quality/bitrate balance for a re-stream; lower = higher quality + bigger segments
+    // Forces a keyframe every 6s regardless of the source's actual frame
+    // rate — HLS needs a keyframe at (or before) the start of every
+    // segment, and -hls_time below is 6s. A fixed -g <frame count> guess
+    // only lines up correctly for one exact frame rate; this doesn't need
+    // to know the source's frame rate at all.
+    '-force_key_frames', 'expr:gte(t,n_forced*6)',
+    '-c:a', 'copy',
+  ];
+}
+
 function startFfmpeg(channel) {
   const outDir = path.join(OUTPUT_ROOT, channel.name);
   fs.mkdirSync(outDir, { recursive: true });
@@ -150,7 +200,7 @@ function startFfmpeg(channel) {
     // do that, since no browser speaks those protocols regardless of
     // headers or IP.
     '-i', channel.url,
-    '-c', 'copy',
+    ...codecArgsFor(channel),
     '-f', 'hls',
     '-hls_time', '6',
     '-hls_list_size', '8',
@@ -159,7 +209,7 @@ function startFfmpeg(channel) {
     indexPath,
   ];
 
-  console.log(`[${channel.name}] starting: ffmpeg ${args.join(' ')}`);
+  console.log(`[${channel.name}] starting${channel.transcode ? ' (transcoding video to H.264)' : ''}: ffmpeg ${args.join(' ')}`);
   const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
 
   proc.stderr.on('data', (chunk) => {
