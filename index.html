@@ -564,6 +564,12 @@
           </button>
           <div class="quality-panel" id="qualityPanel" style="display:none;"></div>
         </div>
+        <div class="quality-wrap">
+          <button class="icon-btn" id="routeBtn" title="Streaming route">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="12" r="2.2"/><path d="M6 8.2v7.6M6 12h6a4 4 0 004-4"/></svg>
+          </button>
+          <div class="quality-panel" id="routePanel" style="display:none;"></div>
+        </div>
         <button class="icon-btn" id="castBtn" title="Cast to a nearby device">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V5a1 1 0 011-1h18a1 1 0 011 1v14a1 1 0 01-1 1h-7"/><path d="M2 13a9 9 0 018 8"/><path d="M2 17a5 5 0 014 4"/><circle cx="3" cy="21" r="1" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -760,6 +766,8 @@
   const recallBtn = el('recallBtn');
   const qualityBtn = el('qualityBtn');
   const qualityPanel = el('qualityPanel');
+  const routeBtn = el('routeBtn');
+  const routePanel = el('routePanel');
   const nowPlayingLabel = el('nowPlayingLabel');
   const sourceBtn = el('sourceBtn');
   const sourcePanel = el('sourcePanel');
@@ -1848,6 +1856,59 @@
     return wrap ? wrap(url) : url;
   }
 
+  // ---------- Manual route selection ----------
+  // "Auto" (null) is the default for every channel — the existing
+  // learned-route/health-check/parallel-race logic above picks whatever
+  // actually works fastest, same as before this existed. Picking a
+  // specific route here pins playback to exactly that one: it skips the
+  // background race entirely, is used as the starting route regardless of
+  // what a health check or learned host route would otherwise suggest,
+  // and — critically — does NOT auto-advance to a different route if it
+  // fails, unlike Auto mode's cascade. That last part matters: silently
+  // hopping to another route the moment "your Worker" (say) fails would
+  // defeat the entire point of manually forcing it, so a failure while
+  // overridden goes straight to the same delayed-retry/exhaustion
+  // handling used once Auto mode has already exhausted every route.
+  let routeOverride = null; // null = Auto; otherwise an index into PLAYBACK_ROUTES
+
+  function renderRouteOptions(){
+    const items = [{idx:-1, label:'Auto'}].concat(
+      ROUTE_LABELS.map((label, i)=>({idx:i, label}))
+    );
+    const current = routeOverride == null ? -1 : routeOverride;
+    routePanel.innerHTML = '';
+    items.forEach(item=>{
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'quality-option' + (current === item.idx ? ' is-selected' : '');
+      btn.textContent = item.label;
+      btn.addEventListener('click', ()=>{
+        routeOverride = item.idx === -1 ? null : item.idx;
+        routePanel.style.display = 'none';
+        routeBtn.classList.remove('is-open');
+        showToast(routeOverride == null ? 'Streaming route set to Auto' : `Streaming route pinned to ${item.label}`);
+        // Route choice only matters once something's actually playing —
+        // re-run the current channel so the new choice takes effect
+        // immediately instead of waiting for the next channel switch.
+        if(activeIndex >= 0) playChannel(activeIndex);
+      });
+      routePanel.appendChild(btn);
+    });
+  }
+  routeBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const opening = routePanel.style.display === 'none' || !routePanel.style.display;
+    if(opening) renderRouteOptions();
+    routePanel.style.display = opening ? 'flex' : 'none';
+    routeBtn.classList.toggle('is-open', opening);
+  });
+  document.addEventListener('click', (e)=>{
+    if(routePanel.style.display !== 'none' && !routePanel.contains(e.target) && e.target !== routeBtn){
+      routePanel.style.display = 'none';
+      routeBtn.classList.remove('is-open');
+    }
+  });
+
   // ---------- Learned per-host route (speed) ----------
   // A big chunk of "this channel takes forever to load" is really "this
   // channel's HOST always fails direct, then always fails your Worker,
@@ -2470,7 +2531,9 @@
         hls.startLoad();
         return;
       }
-      if(routeIdx < PLAYBACK_ROUTES.length - 1){
+      // Not allowed to hop to a different route at all if the person
+      // manually pinned one — see routeOverride above.
+      if(routeOverride == null && routeIdx < PLAYBACK_ROUTES.length - 1){
         showToast(`"${ch.name}" was blocked — trying another route…`);
         startHlsPlayback(ch, token, routeIdx + 1);
         return;
@@ -2565,7 +2628,9 @@
     activeRouteIdx = routeIdx;
     hideQualityMenu(); // native <video> playback (Safari's own HLS engine, or a plain non-HLS src) has no JS-controllable rendition list
     const tryNextRoute = () => {
-      if(routeIdx < PLAYBACK_ROUTES.length - 1){
+      // Not allowed to hop to a different route at all if the person
+      // manually pinned one — see routeOverride above.
+      if(routeOverride == null && routeIdx < PLAYBACK_ROUTES.length - 1){
         showToast(`"${ch.name}" was blocked — trying another route…`);
         startDirectPlayback(ch, token, routeIdx + 1);
       } else {
@@ -2617,10 +2682,14 @@
     // A genuinely NEW channel selection (as opposed to an internal retry
     // replaying this same channel — a route hop, the stall watchdog, or
     // handleRouteExhaustion's own delayed retry below) resets the
-    // exhaustion-retry budget. Without this, a channel that used up its
-    // auto-retries once would stay "used up" forever, even hours later on
-    // a completely fresh attempt.
-    if(activePlayingChannelId !== ch.id) ch._autoRetryCount = 0;
+    // exhaustion-retry budget and any manual route pin back to Auto.
+    // Without this, a channel that used up its auto-retries once would
+    // stay "used up" forever, and a route pinned for one channel would
+    // silently keep overriding every OTHER channel you switch to next.
+    if(activePlayingChannelId !== ch.id){
+      ch._autoRetryCount = 0;
+      routeOverride = null;
+    }
 
     const capability = streamCapability(ch.url);
     if(!capability.scheme || (capability.scheme !== 'http' && capability.scheme !== 'https' && capability.playable)){
@@ -2693,7 +2762,12 @@
       // very likely the real cause behind specific channels (Pluto-
       // sourced ones especially) taking a long time to even start
       // failing before the VLC fallback finally showed up.
-      if(!tryHomeRelay){
+      //
+      // The one exception: a manually pinned route (routeOverride) means
+      // the person explicitly asked to try a specific route anyway — that
+      // deliberate override should get its real shot too, not get
+      // pre-empted by this same fast-fail.
+      if(!tryHomeRelay && routeOverride == null){
         setActiveChannel(ch, idx);
         markActiveBubble();
         playbackToken++;
@@ -2754,19 +2828,24 @@
     const isInsecure = window.location.protocol === 'https:' && /^http:\/\//i.test(ch.url);
     const defaultStartRoute = isInsecure ? 1 : 0;
     const hasCachedRoute = ch.checked === 'ok' && typeof ch.checkedRoute === 'number';
-    // Priority: an explicit per-channel "Check channels" result (most
-    // specific — this exact URL, not just its host) beats the automatic
-    // per-host memory learned from ordinary playback, which beats the
-    // plain http(s)/insecure-source default.
+    // Priority: a manual route pin beats everything else (that's the
+    // whole point of it) — then an explicit per-channel "Check channels"
+    // result (most specific — this exact URL, not just its host), then
+    // the automatic per-host memory learned from ordinary playback, then
+    // the plain http(s)/insecure-source default.
     const learnedHostRoute = hostRouteFor(ch.url);
-    const startRoute = tryHomeRelay
-      ? HOME_RELAY_ROUTE_IDX
-      : hasCachedRoute
-        ? Math.max(ch.checkedRoute, defaultStartRoute)
-        : learnedHostRoute != null
-          ? Math.max(learnedHostRoute, defaultStartRoute)
-          : defaultStartRoute;
-    if(tryHomeRelay){
+    const startRoute = routeOverride != null
+      ? routeOverride
+      : tryHomeRelay
+        ? HOME_RELAY_ROUTE_IDX
+        : hasCachedRoute
+          ? Math.max(ch.checkedRoute, defaultStartRoute)
+          : learnedHostRoute != null
+            ? Math.max(learnedHostRoute, defaultStartRoute)
+            : defaultStartRoute;
+    if(routeOverride != null){
+      showToast(`Playing "${ch.name}" pinned to ${ROUTE_LABELS[routeOverride] || `route ${routeOverride}`}.`);
+    } else if(tryHomeRelay){
       showToast(`"${ch.name}" needs your home relay — trying that now.`);
     } else if(isInsecure && startRoute === defaultStartRoute && defaultStartRoute > 0){
       showToast(`Routing "${ch.name}" through an HTTPS proxy (insecure source) — may be slower or less reliable.`);
@@ -2827,8 +2906,10 @@
     //
     // Skipped once a health check or learned host route already point
     // somewhere specific — that's already-verified information, not a
-    // blind guess, so there's nothing to hedge against.
-    if(!hasCachedRoute && !tryHomeRelay){
+    // blind guess, so there's nothing to hedge against. Also skipped
+    // entirely when a route is manually pinned — hedging would mean
+    // silently jumping away from the exact route the person asked for.
+    if(!hasCachedRoute && !tryHomeRelay && routeOverride == null){
       const workerRouteIdx = PLAYBACK_ROUTES.findIndex((r,i)=> i>=defaultStartRoute && ROUTE_LABELS[i]==='your Worker');
       const corsfixRouteIdx = PLAYBACK_ROUTES.findIndex((r,i)=> i>=defaultStartRoute && ROUTE_LABELS[i]==='corsfix');
       const immediateCandidates = [defaultStartRoute, workerRouteIdx, corsfixRouteIdx].filter((v,i,arr)=> v>=0 && arr.indexOf(v)===i);
