@@ -1670,6 +1670,66 @@
   // ---------- Playback ----------
   let playbackToken = 0; // guards against a stale retry acting after the person switched channels
 
+  // ---------- Stall / background-tab recovery watchdog ----------
+  // Neither hls.js's fatal-error path nor mpegts.js's covers the single
+  // most common real-world "it just stopped" report: a live stream that
+  // freezes on the current frame with currentTime stuck and readyState
+  // still looking fine — no fatal ERROR event ever fires, so the route
+  // cascade above never runs at all, and the person is left staring at a
+  // frozen picture until they manually re-tap the channel. This happens
+  // constantly on phones specifically: the OS suspends a backgrounded
+  // tab's video decode pipeline while the screen is locked or another app
+  // is in front, and resuming the tab doesn't always resume decoding on
+  // its own. Watching actual time progress directly (rather than waiting
+  // for a player library to notice something's wrong) catches this case
+  // regardless of which backend (native/hls.js/mpegts.js) is playing.
+  const STALL_CHECK_INTERVAL = 5000;
+  const STALL_THRESHOLD = 15000;        // no currentTime progress for this long while "playing" counts as stalled
+  const STALL_RESTART_COOLDOWN = 20000; // don't auto-restart more than once per this window — give a restart time to actually work before trying again
+  let lastProgressAt = Date.now();
+  let lastStallRestartAt = 0;
+
+  video.addEventListener('timeupdate', ()=>{ lastProgressAt = Date.now(); });
+
+  function attemptStallRecovery(reason){
+    if(activeIndex < 0 || !filtered[activeIndex]) return;
+    const now = Date.now();
+    if(now - lastStallRestartAt < STALL_RESTART_COOLDOWN) return;
+    lastStallRestartAt = now;
+    console.warn(`Restarting playback (${reason}) for "${filtered[activeIndex].name}".`);
+    playChannel(activeIndex);
+  }
+
+  setInterval(()=>{
+    // A backgrounded tab isn't rendering frames anyone can see anyway, and
+    // on most mobile browsers timeupdate itself gets throttled/suspended
+    // while hidden — checking here would just misfire on normal
+    // backgrounding. visibilitychange below handles the return trip.
+    if(document.hidden) return;
+    if(activeIndex < 0 || video.paused || video.ended) return;
+    if(Date.now() - lastProgressAt > STALL_THRESHOLD) attemptStallRecovery('no progress for 15s');
+  }, STALL_CHECK_INTERVAL);
+
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.hidden || activeIndex < 0) return;
+    lastProgressAt = Date.now(); // reset so the periodic check above doesn't fire mid-grace-window while this settles
+    const timeBefore = video.currentTime;
+    video.play().catch(()=>{});
+    // A plain video.play() often isn't enough to un-stick a session the OS
+    // actually suspended (the underlying MediaSource/decoder can be gone
+    // even though the element itself looks fine) — give it a few seconds
+    // to prove it's actually decoding again before falling back to a real
+    // restart.
+    setTimeout(()=>{
+      if(document.hidden || activeIndex < 0) return;
+      if(video.paused || video.currentTime === timeBefore){
+        attemptStallRecovery('resumed from background but did not recover');
+      } else {
+        lastProgressAt = Date.now();
+      }
+    }, 4000);
+  });
+
   // Route index 0 is "no proxy" (direct); indexes 1+ are tried in order on
   // failure. Your own proxy (MY_PROXY_URL, if set) goes first since it
   // won't be rate-limited the way shared public ones are; the two public
@@ -2096,9 +2156,44 @@
     });
     hls.loadSource(ch.url);
     hls.attachMedia(video);
+    // Tracks in-place recovery attempts (recoverMediaError / startLoad) for
+    // THIS route so a channel that keeps re-erroring in a tight loop still
+    // eventually gives up and moves on, instead of recovering forever.
+    let inPlaceRecoveries = 0;
+    const MAX_IN_PLACE_RECOVERIES = 3;
     hls.on(Hls.Events.ERROR, (evt, data)=>{
       if(token !== playbackToken || !data.fatal) return;
       console.warn(`Playback failed for "${ch.name}" via route ${routeIdx}:`, data.type, data.details, data.response || '');
+      // A fatal error's TYPE tells you what actually broke — treating every
+      // fatal error as "this route/proxy is bad" (the old behavior here)
+      // was wrong for two of the three cases hls.js reports: a
+      // NETWORK_ERROR really can mean the route is bad and cycling routes
+      // is correct, but a MEDIA_ERROR (decode/buffer/append failure) has
+      // nothing to do with which proxy served the bytes — hls.js ships a
+      // dedicated in-place recovery for exactly that
+      // (recoverMediaError, which resets the MediaSource/decoder without
+      // touching the network path). Jumping to "another route" for a
+      // MEDIA_ERROR just re-fetches the identical bytes through a
+      // different proxy, fails identically, and burns through the whole
+      // PLAYBACK_ROUTES list for a problem no route change could ever
+      // fix — the likely real cause behind channels that "used to play
+      // fine, then died" without ever changing servers.
+      if(data.type === Hls.ErrorTypes.MEDIA_ERROR && inPlaceRecoveries < MAX_IN_PLACE_RECOVERIES){
+        inPlaceRecoveries++;
+        console.warn(`Recovering "${ch.name}" from a media error in place (attempt ${inPlaceRecoveries}/${MAX_IN_PLACE_RECOVERIES}) — not a route problem.`);
+        hls.recoverMediaError();
+        return;
+      }
+      if(data.type === Hls.ErrorTypes.NETWORK_ERROR && inPlaceRecoveries < MAX_IN_PLACE_RECOVERIES){
+        // A network error that's merely a transient blip (brief wifi/cell
+        // hiccup, a single dropped segment) recovers cleanly with
+        // startLoad() on the SAME route; only actually-dead routes need to
+        // fall through to the route cascade below.
+        inPlaceRecoveries++;
+        console.warn(`Retrying "${ch.name}" on the same route (attempt ${inPlaceRecoveries}/${MAX_IN_PLACE_RECOVERIES}) before giving up on it.`);
+        hls.startLoad();
+        return;
+      }
       if(routeIdx < PLAYBACK_ROUTES.length - 1){
         showToast(`"${ch.name}" was blocked — trying another route…`);
         startHlsPlayback(ch, token, routeIdx + 1);
@@ -2166,6 +2261,15 @@
     }catch(e){ onFail(); }
   }
 
+  // Holds the current pending "loadedmetadata -> play()" listener so it can
+  // be removed before a new one's added. Without this, a channel that gets
+  // switched or route-cascaded several times before a given src actually
+  // reaches loadedmetadata (common when several routes fail fast in a row)
+  // leaves each prior {once:true} listener registered indefinitely — it
+  // never fires (that src got replaced first) so it's never cleaned up,
+  // and it silently accumulates one extra dangling listener per attempt
+  // over a long viewing session.
+  let pendingLoadedMetadataHandler = null;
   function startDirectPlayback(ch, token, routeIdx){
     const tryNextRoute = () => {
       if(routeIdx < PLAYBACK_ROUTES.length - 1){
@@ -2176,13 +2280,21 @@
         markChannelUnplayable(ch, 'Failed during playback');
       }
     };
+    if(pendingLoadedMetadataHandler){
+      video.removeEventListener('loadedmetadata', pendingLoadedMetadataHandler);
+      pendingLoadedMetadataHandler = null;
+    }
     video.src = routedUrl(ch.url, routeIdx);
     video.onerror = ()=>{
       if(token !== playbackToken) return;
       console.warn(`Direct playback failed for "${ch.name}" via route ${routeIdx} — trying mpegts.js on the same route`);
       startMpegtsPlayback(ch, token, routeIdx, tryNextRoute);
     };
-    video.addEventListener('loadedmetadata', ()=> video.play().catch(()=>{}), {once:true});
+    pendingLoadedMetadataHandler = ()=>{
+      pendingLoadedMetadataHandler = null;
+      video.play().catch(()=>{});
+    };
+    video.addEventListener('loadedmetadata', pendingLoadedMetadataHandler, {once:true});
   }
 
   async function playChannel(idx){
