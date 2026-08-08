@@ -1225,6 +1225,36 @@
     return Array.from(new Set(arr.filter(Boolean))).sort((a,b)=>a.localeCompare(b));
   }
 
+  // ---------- Filtering blank metadata without hiding channels entirely ----------
+  // Country/language come from tvg-country/tvg-language attributes (or, for
+  // the main iptv-org list, a companion playlist merged in later — see
+  // hydrateCountryAndLanguage) — plenty of channels, especially from
+  // sources outside iptv-org's own list (custom CSV sources, LG/Local Now
+  // playlists, etc.) simply never get a value for these at all. Those
+  // channels showed up fine with no filters applied, then silently
+  // vanished the instant ANY specific Country/Category/Language was
+  // picked — not because they didn't match, but because uniqueSorted's
+  // .filter(Boolean) never even offered a way to select "blank" in the
+  // first place, while the equality check below still excluded them for
+  // every OTHER selection. A channel with unknown metadata was
+  // effectively only ever reachable with every filter left on "All".
+  //
+  // Fix: surface an explicit "Unspecified" option per dimension whenever
+  // at least one candidate channel actually has no value there, so those
+  // channels stay findable — deliberately, not by accident of default
+  // filter state — instead of just disappearing.
+  const UNSPECIFIED_FILTER_VALUE = '\u0000unspecified';
+  const UNSPECIFIED_LABEL = 'Unspecified';
+  function fieldMatchesFilter(actual, filterValue){
+    if(!filterValue) return true; // "All" — nothing to narrow on this dimension
+    if(filterValue === UNSPECIFIED_FILTER_VALUE) return !actual;
+    return actual === filterValue;
+  }
+  function optionsWithUnspecified(channels, field){
+    const named = uniqueSorted(channels.map(c=>c[field]));
+    return channels.some(c=>!c[field]) ? [...named, UNSPECIFIED_FILTER_VALUE] : named;
+  }
+
   // Builds tvgId -> group-title (and name -> group-title as a fallback) maps
   // from companion playlists like index.country.m3u / index.language.m3u,
   // where every channel's category is swapped out for its country/language.
@@ -1311,7 +1341,8 @@
     selectEl.appendChild(optAll);
     values.forEach(v=>{
       const o = document.createElement('option');
-      o.value = v; o.textContent = v;
+      o.value = v;
+      o.textContent = v === UNSPECIFIED_FILTER_VALUE ? UNSPECIFIED_LABEL : v;
       selectEl.appendChild(o);
     });
     if(selectedValue && values.includes(selectedValue)) selectEl.value = selectedValue;
@@ -1346,7 +1377,7 @@
       + (insecureCount ? ` <span class="meta-note">· ${insecureCount.toLocaleString()} play via an HTTPS proxy (insecure source)</span>` : '');
 
     populateSelect(countrySel, [], 'Country');
-    populateSelect(categorySel, uniqueSorted(allChannels.map(c=>c.category)), 'Category');
+    populateSelect(categorySel, optionsWithUnspecified(allChannels, 'category'), 'Category');
     populateSelect(languageSel, [], 'Language');
 
     applyFilters();
@@ -1403,8 +1434,8 @@
       }
     }
 
-    populateSelect(countrySel, uniqueSorted(allChannels.map(c=>c.country)), 'Country', countrySel.value);
-    populateSelect(languageSel, uniqueSorted(allChannels.map(c=>c.language)), 'Language', languageSel.value);
+    populateSelect(countrySel, optionsWithUnspecified(allChannels, 'country'), 'Country', countrySel.value);
+    populateSelect(languageSel, optionsWithUnspecified(allChannels, 'language'), 'Language', languageSel.value);
   }
 
   // Runs a task once the browser is actually idle, rather than immediately
@@ -1437,10 +1468,16 @@
     const workingOnly = workingOnlyToggle.checked;
 
     filtered = allChannels.filter(c=>{
-      if(country && c.country !== country) return false;
-      if(category && c.category !== category) return false;
-      if(language && c.language !== language) return false;
-      if(q && !c.name.toLowerCase().includes(q)) return false;
+      if(!fieldMatchesFilter(c.country, country)) return false;
+      if(!fieldMatchesFilter(c.category, category)) return false;
+      if(!fieldMatchesFilter(c.language, language)) return false;
+      // Checks tvg-id too, not just the display name. A channel's on-air
+      // branding can get renamed (e.g. the 2024-2025 Diamond Sports
+      // rebrand of most regional Fox Sports Networks to "FanDuel Sports
+      // Network") while its tvg-id keeps the original identity
+      // ("FoxSports1.us" style) — searching only the display name misses
+      // exactly these renamed-but-not-fully-scrubbed channels.
+      if(q && !c.name.toLowerCase().includes(q) && !(c.tvgId && c.tvgId.toLowerCase().includes(q))) return false;
       if(workingOnly && c.checked !== 'ok') return false;
       return true;
     });
@@ -1698,9 +1735,9 @@
   // the channel list, and each dropdown's own option list narrows to only
   // what's still reachable given the other two current selections.
   function matchesFilters(c, f){
-    if(f.country && c.country !== f.country) return false;
-    if(f.category && c.category !== f.category) return false;
-    if(f.language && c.language !== f.language) return false;
+    if(!fieldMatchesFilter(c.country, f.country)) return false;
+    if(!fieldMatchesFilter(c.category, f.category)) return false;
+    if(!fieldMatchesFilter(c.language, f.language)) return false;
     return true;
   }
 
@@ -1710,9 +1747,12 @@
     // Two passes so a value invalidated by another dropdown's narrowing has
     // a chance to relax the remaining option lists back open again.
     for(let pass=0; pass<2; pass++){
-      countryOptions  = uniqueSorted(allChannels.filter(c=>matchesFilters(c, {category:categorySel.value, language:languageSel.value})).map(c=>c.country));
-      categoryOptions = uniqueSorted(allChannels.filter(c=>matchesFilters(c, {country:countrySel.value,   language:languageSel.value})).map(c=>c.category));
-      languageOptions = uniqueSorted(allChannels.filter(c=>matchesFilters(c, {country:countrySel.value,   category:categorySel.value})).map(c=>c.language));
+      const countryCandidates  = allChannels.filter(c=>matchesFilters(c, {category:categorySel.value, language:languageSel.value}));
+      const categoryCandidates = allChannels.filter(c=>matchesFilters(c, {country:countrySel.value,   language:languageSel.value}));
+      const languageCandidates = allChannels.filter(c=>matchesFilters(c, {country:countrySel.value,   category:categorySel.value}));
+      countryOptions  = optionsWithUnspecified(countryCandidates, 'country');
+      categoryOptions = optionsWithUnspecified(categoryCandidates, 'category');
+      languageOptions = optionsWithUnspecified(languageCandidates, 'language');
 
       if(countrySel.value && !countryOptions.includes(countrySel.value)) countrySel.value = '';
       if(categorySel.value && !categoryOptions.includes(categorySel.value)) categorySel.value = '';
