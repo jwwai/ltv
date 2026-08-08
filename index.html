@@ -14,6 +14,9 @@
 <link rel="preconnect" href="https://api.codetabs.com">
 <link rel="preconnect" href="https://api.allorigins.win">
 <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<!-- HEVC/H.265 fallback decoder's CDN hosts — see the module script below. -->
+<link rel="preconnect" href="https://esm.sh" crossorigin>
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js" defer></script>
@@ -28,6 +31,57 @@
   };
 </script>
 <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js" defer></script>
+<script type="module">
+  // ---------- HEVC/H.265 client-side fallback decoder ----------
+  // Some IPTV sources (South Asian providers especially) encode "HD"
+  // channels in HEVC/H.265 to cut bandwidth — a codec most browsers other
+  // than Safari/macOS or recent Chrome-on-capable-hardware simply cannot
+  // decode via MediaSource at all. The symptom is exactly "audio plays,
+  // video never appears, no error" (confirmed directly — this is what a
+  // codec a browser can't decode looks like, not a routing/CORS problem;
+  // no proxy or route fix could ever touch it).
+  //
+  // @hevcjs/core (https://github.com/privaloops/hevc.js) is a from-scratch,
+  // MIT-licensed HEVC decoder compiled to WebAssembly (236KB) with a
+  // built-in real-time HEVC->H.264 transcoding pipeline. installMSEIntercept
+  // patches the browser's own MediaSource.addSourceBuffer() globally —
+  // it's not tied to any specific player library (its README also ships
+  // dash.js/Shaka-specific plugins, but this is the underlying player-
+  // agnostic primitive both of those are built on), so it applies
+  // transparently underneath hls.js here too: hls.js keeps creating
+  // SourceBuffers exactly as it always has, with no idea HEVC was ever
+  // involved. This is genuinely zero-cost when native HEVC decode is
+  // already available (Safari, any browser on macOS, Chrome on
+  // HEVC-capable hardware, etc.) — it probes for real native support
+  // first and only loads/runs the WASM path when that probe fails.
+  //
+  // Because the patch is keyed on CODEC, not on any particular channel,
+  // this fixes every HEVC-encoded channel in the app automatically —
+  // there's no per-channel list to maintain, unlike the ffmpeg-relay
+  // transcode option (which remains a valid heavier-duty fallback for
+  // the rare case a device is too underpowered for real-time WASM
+  // transcoding, or WebCodecs H.264 encoding genuinely isn't available).
+  //
+  // window.__hevcInterceptReady is awaited once per channel start inside
+  // startHlsPlayback (see the main script below) before the very first
+  // playback attempt each session, so the patch is guaranteed installed before hls.js ever
+  // creates its first MediaSource. If the CDN is unreachable or this
+  // fails to load for any reason, it fails soft — playback just falls
+  // back to today's behavior (audio-only + the existing codec-support
+  // toast) instead of breaking anything else in the app.
+  window.__hevcInterceptReady = import('https://esm.sh/@hevcjs/core@1')
+    .then(({ installMSEIntercept }) => installMSEIntercept({
+      workerUrl: 'https://unpkg.com/@hevcjs/core@1/dist/transcode-worker.js',
+      wasmUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.js',
+      wasmBinaryUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.wasm',
+    }))
+    .then(()=>{ console.info('HEVC fallback decoder ready.'); window.__hevcInterceptResolved = true; return true; })
+    .catch(e=>{
+      console.warn('HEVC fallback decoder failed to load — HEVC channels will fall back to the VLC prompt instead.', e);
+      window.__hevcInterceptResolved = false;
+      return false;
+    });
+</script>
 <style>
   :root{
     --bg:#08090d;
@@ -2469,13 +2523,70 @@
     });
     if(playable) return;
     const isHevc = levelsWithVideo.some(lvl => /^(hvc1|hev1)/i.test(lvl.videoCodec));
+    // MediaSource.isTypeSupported() genuinely doesn't reflect what the
+    // WASM fallback decoder above can do — it only patches
+    // addSourceBuffer() itself, deliberately NOT isTypeSupported()
+    // (hevc.js's own docs note isTypeSupported() "can lie" in the other
+    // direction on some browsers, so it doesn't trust it either). If that
+    // decoder loaded successfully and this is HEVC, defer to the DOM-level
+    // checkForAudioOnlyPlayback backstop instead of flagging this as
+    // broken here — it may well just work.
+    if(isHevc && window.__hevcInterceptResolved) return;
     const codecNote = isHevc ? ' (HEVC/H.265 — not supported by this browser)' : ` (codec: ${levelsWithVideo[0].videoCodec})`;
     showToast(`"${ch.name}"'s video${codecNote} won't decode in this browser — audio may still play. Try the VLC button.`);
     markChannelUnplayable(ch, `Video codec not supported by this browser${codecNote} — open in VLC instead`);
   }
 
+  // ---------- Audio-only playback detection (backstop) ----------
+  // checkVideoCodecSupport above only fires when the manifest explicitly
+  // declares a CODECS string in EXT-X-STREAM-INF — plenty of real-world
+  // IPTV sources are a single flat media playlist with no such
+  // declaration at all (no master playlist, no variant streams), so
+  // hls.js has nothing to check until it's actually demuxing segments.
+  // Worse, an unsupported VIDEO track can fail to ever produce a frame
+  // WITHOUT hls.js surfacing anything as a fatal error at all — audio
+  // keeps playing, nothing ever gets reported, and the earlier check
+  // never had a chance to run. This sidesteps the guesswork entirely by
+  // checking the actual <video> element's own state instead of any
+  // backend's internal codec negotiation: videoWidth/videoHeight only
+  // become nonzero once a real decoded frame is actually ready to
+  // display — true regardless of which backend is playing (hls.js,
+  // native HLS, mpegts.js) or why decoding is failing. If audio is
+  // clearly progressing but no frame has shown up after a real grace
+  // period, that's about as close to direct proof as this can get.
+  // 10s comfortably clears both normal startup buffering AND the WASM
+  // HEVC decoder's own ~2-3s first-segment latency (per its docs) when
+  // that path is the one actually doing the work — so this stays a
+  // reliable signal either way, not just for native decode.
+  const NO_VIDEO_CHECK_DELAY = 10000;
+  function checkForAudioOnlyPlayback(ch, token){
+    setTimeout(()=>{
+      if(token !== playbackToken) return;           // channel switched since — not relevant anymore
+      if(video.paused || video.ended) return;        // not actually playing — a different problem (the stall watchdog covers that)
+      if(video.videoWidth > 0 || video.videoHeight > 0) return; // a real frame showed up — genuinely fine, whether native or via the WASM fallback
+      if(video.currentTime <= 0) return;             // hasn't actually started progressing at all yet either — not this specific case
+      // Distinguishes "we tried the WASM fallback and it still couldn't
+      // keep up" from "no fallback was even available" — genuinely
+      // different situations worth telling apart in the message.
+      const triedFallback = window.__hevcInterceptResolved === true;
+      const reason = triedFallback
+        ? 'its video still isn\u2019t decoding even with the built-in HEVC fallback decoder — this device may be too slow for real-time software decode'
+        : 'its video most likely isn\u2019t decodable in this browser (commonly HEVC/H.265)';
+      showToast(`"${ch.name}" is playing audio only — ${reason}. Try the VLC button.`);
+      markChannelUnplayable(ch, `Playing audio only — ${reason} — open in VLC instead`);
+    }, NO_VIDEO_CHECK_DELAY);
+  }
+
   // log the real reason and step to the next route before giving up.
-  function startHlsPlayback(ch, token, routeIdx){
+  async function startHlsPlayback(ch, token, routeIdx){
+    // Make sure the HEVC fallback decoder (if it loaded) is actually
+    // installed before hls.js creates its MediaSource — otherwise a
+    // channel that happens to need it could slip through on the very
+    // first play of the session, before the CDN module has resolved.
+    // Already-resolved after the first call, so this is a no-op wait on
+    // every subsequent channel switch.
+    if(window.__hevcInterceptReady) await window.__hevcInterceptReady;
+    if(token !== playbackToken) return; // channel changed again while we were waiting on that — this attempt is stale, do nothing
     activeRouteIdx = routeIdx;
     if(hls){ hls.destroy(); hls = null; }
     if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
@@ -2492,6 +2603,17 @@
       // live session instead of growing unbounded — a common source of
       // gradual slowdown/lag the longer a channel has been playing.
       backBufferLength: isMobile ? 10 : 30,
+      // Caps the auto-selected quality level to the video element's
+      // actual displayed size instead of always chasing the highest
+      // available rendition — real bandwidth/CPU savings whenever the
+      // player isn't full-screen, and it matters more than usual now:
+      // the HEVC fallback decoder above is real WASM decode+encode work
+      // per frame, and transcoding at a smaller resolution is
+      // proportionally cheaper, directly reducing the odds of it falling
+      // behind realtime on a modest device. Harmless for ordinary H.264
+      // channels too — hls.js re-evaluates this on resize/fullscreen, so
+      // going fullscreen still unlocks the full resolution.
+      capLevelToPlayerSize: true,
       // Fail a slow/unresponsive route quickly rather than stalling —
       // matters especially on the proxied routes, so a bad one gets
       // replaced by the next in PLAYBACK_ROUTES sooner. Must stay
@@ -2951,6 +3073,7 @@
     } else {
       startDirectPlayback(ch, token, startRoute);
     }
+    checkForAudioOnlyPlayback(ch, token);
 
     // Hedge against a slow route cascade: while the eager attempt above is
     // already underway, race EVERY applicable route in the background —

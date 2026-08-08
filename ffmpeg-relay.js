@@ -80,14 +80,24 @@ const CHANNELS = [
   // --- HEVC/H.265 video — needs re-encoding to H.264, not just remuxing,
   //     to actually show video in a browser. Confirmed: plays fine in
   //     VLC, audio-only/no-video in the browser via hls.js — the exact
-  //     signature of an undecodable video codec. The channel name below
-  //     must match this app's exact display name for this source
-  //     ("Sony Entertainment Channel") once slugified — double-check
-  //     against what's actually shown in the app if this doesn't
-  //     auto-match; playlist sources sometimes label it slightly
+  //     signature of an undecodable video codec.
+  //
+  //     NOTE: index.html now also loads a client-side WebAssembly HEVC
+  //     decoder (@hevcjs/core, see the <script type="module"> block near
+  //     the top of index.html) that handles this automatically for ANY
+  //     HEVC channel, with zero server setup — no relay needed at all in
+  //     the common case. This server-side entry is now a fallback, only
+  //     relevant if that WASM path can't keep up in real time on a given
+  //     visitor's device (older/underpowered hardware) or their browser
+  //     lacks WebCodecs H.264 encoding — genuinely uncommon, but real
+  //     enough to leave this configured rather than delete it outright.
+  //
+  //     The channel name below must match this app's exact display name
+  //     for this source ("Sony Entertainment Channel") once slugified —
+  //     double-check against what's actually shown in the app if this
+  //     doesn't auto-match; playlist sources sometimes label it slightly
   //     differently (e.g. "Sony Entertainment Channel HD", "SET HD"). ---
   { name: 'sony-entertainment-channel', url: 'http://38.96.178.205/SONYHD/index.m3u8', transcode: true },
-  { url: 'http://38.96.178.205/SONYHD/index.m3u8', transcode: true },
 
   // --- RTSP/RTMP/UDP sources — no browser can EVER play these directly,
   //     with or without a proxy (no browser networking API speaks any of
