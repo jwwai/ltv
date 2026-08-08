@@ -1763,14 +1763,27 @@
 
   // Route index 0 is "no proxy" (direct); indexes 1+ are tried in order on
   // failure. Your own proxy (MY_PROXY_URL, if set) goes first since it
-  // won't be rate-limited the way shared public ones are; the two public
-  // proxies are the fallback so one being down doesn't sink the chain.
-  // (corsproxy.io is deliberately not in this list — it now requires a paid
-  // API key for any non-localhost origin, so it 403s every request from a
-  // real deployed site.)
+  // won't be rate-limited the way shared public ones are; the public
+  // proxies after it are fallbacks so one being down doesn't sink the
+  // chain. (corsproxy.io is deliberately not in this list — it now
+  // requires a paid API key for any non-localhost origin, so it 403s
+  // every request from a real deployed site. cors.x2u.in and ThingProxy
+  // are also excluded — both cap payload size well under a typical HLS
+  // segment (750KB and 100KB respectively), so they'd work for the
+  // playlist text and then silently truncate/fail on the actual video
+  // bytes.)
+  //
+  // corsfix is included specifically because its free tier explicitly
+  // allows github.io origins with no signup/API key (confirmed via its
+  // own pricing page), has no meaningful payload cap for the response
+  // side (only the 5MB REQUEST-body cap applies, irrelevant to a GET),
+  // and is built for actually streaming the proxied response through
+  // rather than buffering it whole — the right shape for continuous
+  // video segment fetches, not just one-off small API calls.
   const PLAYBACK_ROUTES = [
     null,
     ...(MY_PROXY_URL ? [u => `${MY_PROXY_URL}?url=${encodeURIComponent(u)}`] : []),
+    u => `https://proxy.corsfix.com/?${u}`,
     u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
     u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     ...(MY_HOME_RELAY_URL ? [u => `${MY_HOME_RELAY_URL}?url=${encodeURIComponent(u)}`] : [])
@@ -1779,6 +1792,7 @@
   const ROUTE_LABELS = [
     'direct',
     ...(MY_PROXY_URL ? ['your Worker'] : []),
+    'corsfix',
     'codetabs',
     'allorigins',
     ...(MY_HOME_RELAY_URL ? ['home relay'] : [])
@@ -1789,6 +1803,7 @@
   // would double-encode the target and break every request).
   const PROXY_BASES = [
     ...(MY_PROXY_URL ? [MY_PROXY_URL] : []),
+    'https://proxy.corsfix.com/',
     'https://api.codetabs.com/v1/proxy',
     'https://api.allorigins.win/raw',
     ...(MY_HOME_RELAY_URL ? [MY_HOME_RELAY_URL] : [])
@@ -2709,19 +2724,27 @@
     // cascade even tries the next one, while a plain probe fetch fails a
     // dead route in a fraction of that time.
     //
-    // Trusted routes (direct + your own Worker) go out immediately;
-    // shared/rate-limited public proxies are deliberately held back for
-    // DELAYED_TIER_STAGGER (see raceForBestRoute) so they only ever get
-    // used when the trusted tier has genuinely failed or is still
-    // stalling — this is "prioritise secure source" in practice: your own
-    // unshared routes always get the first, uncontested shot at winning.
+    // Immediate tier: direct, your own Worker, AND corsfix all go out
+    // together, uncontested. corsfix earns a spot here rather than in the
+    // staggered/delayed tier with codetabs/allorigins — unlike those two,
+    // it's built as production infrastructure (unmetered response size,
+    // no signup, explicitly whitelists github.io), so there's no quota to
+    // protect by holding it back, and racing it immediately is what
+    // actually shortens load time for any channel that needs a proxy at
+    // all. codetabs/allorigins are shared, best-effort community services
+    // by comparison — still held back for DELAYED_TIER_STAGGER (see
+    // raceForBestRoute) so they're only spent on requests the faster,
+    // sturdier tier couldn't already answer. This is "prioritise secure
+    // source" in practice: your own unshared/production routes always get
+    // the first, uncontested shot at winning.
     //
     // Skipped once a health check or learned host route already point
     // somewhere specific — that's already-verified information, not a
     // blind guess, so there's nothing to hedge against.
     if(!hasCachedRoute && !tryHomeRelay){
       const workerRouteIdx = PLAYBACK_ROUTES.findIndex((r,i)=> i>=defaultStartRoute && ROUTE_LABELS[i]==='your Worker');
-      const immediateCandidates = [defaultStartRoute, workerRouteIdx].filter((v,i,arr)=> v>=0 && arr.indexOf(v)===i);
+      const corsfixRouteIdx = PLAYBACK_ROUTES.findIndex((r,i)=> i>=defaultStartRoute && ROUTE_LABELS[i]==='corsfix');
+      const immediateCandidates = [defaultStartRoute, workerRouteIdx, corsfixRouteIdx].filter((v,i,arr)=> v>=0 && arr.indexOf(v)===i);
       const delayedCandidates = PLAYBACK_ROUTES
         .map((r,i)=>i)
         .filter(i => i >= defaultStartRoute && i !== HOME_RELAY_ROUTE_IDX && !immediateCandidates.includes(i));
