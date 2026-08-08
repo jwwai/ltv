@@ -2441,6 +2441,39 @@
     }
   });
 
+  // ---------- Video codec support check ----------
+  // "Plays audio, shows no video" (as opposed to failing outright) has a
+  // specific, common cause that's easy to mistake for a routing/CORS
+  // problem: the source is encoded in a video codec this browser's
+  // MediaSource pipeline can't decode — HEVC/H.265 is by far the most
+  // common case in the wild, since plenty of IPTV providers now encode
+  // "HD" channels in it to cut bandwidth. No proxy or route fix can ever
+  // touch this — it's the same bytes either way, decoded by a completely
+  // different pipeline than networking. VLC bundles its own software
+  // decoder for virtually every codec (that's why "works in VLC, silent
+  // here" is the exact signature of this, not a network issue), but
+  // browsers rely on native MediaSource codec support, which excludes
+  // HEVC almost everywhere except Safari.
+  //
+  // Checked directly against MediaSource.isTypeSupported() rather than
+  // guessed from the codec string alone — that's the same check the
+  // browser itself uses, so it stays correct across browsers/versions
+  // without this needing its own maintained compatibility table.
+  function checkVideoCodecSupport(ch, hlsInstance){
+    if(!hlsInstance.levels || !hlsInstance.levels.length || !window.MediaSource) return;
+    const levelsWithVideo = hlsInstance.levels.filter(lvl => lvl.videoCodec);
+    if(!levelsWithVideo.length) return; // manifest doesn't declare an explicit CODECS string — nothing to check, don't guess
+    const playable = levelsWithVideo.some(lvl=>{
+      try{ return MediaSource.isTypeSupported(`video/mp4; codecs="${lvl.videoCodec}"`); }
+      catch(e){ return true; } // isTypeSupported itself erroring shouldn't produce a false "unsupported" report
+    });
+    if(playable) return;
+    const isHevc = levelsWithVideo.some(lvl => /^(hvc1|hev1)/i.test(lvl.videoCodec));
+    const codecNote = isHevc ? ' (HEVC/H.265 — not supported by this browser)' : ` (codec: ${levelsWithVideo[0].videoCodec})`;
+    showToast(`"${ch.name}"'s video${codecNote} won't decode in this browser — audio may still play. Try the VLC button.`);
+    markChannelUnplayable(ch, `Video codec not supported by this browser${codecNote} — open in VLC instead`);
+  }
+
   // log the real reason and step to the next route before giving up.
   function startHlsPlayback(ch, token, routeIdx){
     activeRouteIdx = routeIdx;
@@ -2505,6 +2538,7 @@
     hls.on(Hls.Events.MANIFEST_PARSED, ()=>{
       if(token !== playbackToken) return;
       setupQualityMenu(hls);
+      checkVideoCodecSupport(ch, hls);
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, ()=>{
       if(token !== playbackToken || qualityPanel.style.display === 'none') return;
