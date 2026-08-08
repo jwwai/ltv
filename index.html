@@ -226,6 +226,26 @@
   .icon-btn.is-muted{color:var(--danger);opacity:1;}
   .round-btn{border:1.4px solid rgba(255,255,255,.55);border-radius:50%;}
   .round-btn svg{width:13px;height:13px;}
+  .recall-btn{
+    font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:11.5px;
+    letter-spacing:.2px;
+  }
+
+  .quality-wrap{position:relative;}
+  .quality-panel{
+    position:absolute;bottom:calc(100% + 8px);right:0;z-index:20;
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;
+    padding:6px;box-shadow:var(--card-shadow);min-width:110px;
+    display:flex;flex-direction:column;gap:2px;
+  }
+  .quality-option{
+    background:none;border:none;color:var(--text);font:inherit;font-size:12.5px;font-weight:500;
+    text-align:left;padding:7px 10px;border-radius:6px;cursor:pointer;
+    display:flex;align-items:center;justify-content:space-between;gap:10px;white-space:nowrap;
+  }
+  .quality-option:hover{background:rgba(255,255,255,.08);}
+  .quality-option.is-selected{color:var(--accent);}
+  .quality-option.is-selected::after{content:'✓';font-size:11px;flex:none;}
 
   .vol-group{display:flex;align-items:center;gap:8px;}
   .vol-slider{
@@ -534,9 +554,16 @@
         <button class="icon-btn round-btn" id="nextBtn" title="Next channel">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM5 5v14l9-7-9-7z"/></svg>
         </button>
+        <button class="icon-btn round-btn recall-btn" id="recallBtn" title="Recall previous channel" style="display:none;">P</button>
 
         <div class="spacer"></div>
 
+        <div class="quality-wrap">
+          <button class="icon-btn" id="qualityBtn" title="Video quality" style="display:none;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 18h4M4 12h8M4 6h16"/></svg>
+          </button>
+          <div class="quality-panel" id="qualityPanel" style="display:none;"></div>
+        </div>
         <button class="icon-btn" id="castBtn" title="Cast to a nearby device">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V5a1 1 0 011-1h18a1 1 0 011 1v14a1 1 0 01-1 1h-7"/><path d="M2 13a9 9 0 018 8"/><path d="M2 17a5 5 0 014 4"/><circle cx="3" cy="21" r="1" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -695,6 +722,7 @@
   let renderedCount = 0;
   let activeIndex = -1;
   let activePlayingChannelId = null; // survives applyFilters() rebuilding `filtered` — activeIndex alone doesn't (see applyFilters)
+  let previousPlayingChannelId = null; // the channel that was active right before the current one, for the "recall" (P) button — a TV-remote-style last-channel toggle
   let hls = null;
   let mpegtsPlayer = null;
 
@@ -729,6 +757,9 @@
   const guideSourceNote = el('guideSourceNote');
   const vlcBtn = el('vlcBtn');
   const resolveBtn = el('resolveBtn');
+  const recallBtn = el('recallBtn');
+  const qualityBtn = el('qualityBtn');
+  const qualityPanel = el('qualityPanel');
   const nowPlayingLabel = el('nowPlayingLabel');
   const sourceBtn = el('sourceBtn');
   const sourcePanel = el('sourcePanel');
@@ -1774,6 +1805,51 @@
     return wrap ? wrap(url) : url;
   }
 
+  // ---------- Learned per-host route (speed) ----------
+  // A big chunk of "this channel takes forever to load" is really "this
+  // channel's HOST always fails direct, then always fails your Worker,
+  // and only succeeds on the 3rd/4th route" — playback still restarts
+  // that same discovery from route 0 every single time, on every channel
+  // that happens to share that host, because nothing remembers the
+  // outcome. Lots of channels across a playlist share a handful of
+  // streaming hostnames (a shared CDN, a shared stitcher domain, etc.),
+  // so the very first successful playback on a host is a real, reusable
+  // signal for every other channel on that same host afterward — not
+  // just this one channel (that's what ch.checkedRoute from "Check
+  // channels" already covers) but any channel, checked or not,
+  // automatically, without the person having to run a bulk check first.
+  // Persisted so it also survives a page reload, not just the session.
+  const HOST_ROUTE_STORAGE_KEY = 'livetv_host_route_v1';
+  const HOST_ROUTE_MAX_ENTRIES = 300; // a speed optimization, not a system of record — cap growth rather than let a long multi-source session accumulate unbounded entries
+  let hostRouteMemory = new Map();
+  try{
+    const saved = JSON.parse(localStorage.getItem(HOST_ROUTE_STORAGE_KEY) || '{}');
+    Object.entries(saved).forEach(([host, idx]) => hostRouteMemory.set(host, idx));
+  }catch(e){ /* storage unavailable or corrupt — starts fresh, nothing breaks */ }
+
+  function hostnameOf(url){
+    try{ return new URL(url).hostname.toLowerCase(); }catch(e){ return null; }
+  }
+  function hostRouteFor(url){
+    const host = hostnameOf(url);
+    return host != null ? hostRouteMemory.get(host) : undefined;
+  }
+  function rememberHostRoute(url, routeIdx){
+    const host = hostnameOf(url);
+    if(host == null || hostRouteMemory.get(host) === routeIdx) return;
+    hostRouteMemory.set(host, routeIdx);
+    if(hostRouteMemory.size > HOST_ROUTE_MAX_ENTRIES){
+      hostRouteMemory.delete(hostRouteMemory.keys().next().value);
+    }
+    try{ localStorage.setItem(HOST_ROUTE_STORAGE_KEY, JSON.stringify(Object.fromEntries(hostRouteMemory))); }
+    catch(e){ /* storage unavailable/full — still helps for the rest of this session even if it can't persist */ }
+  }
+  // Set at the top of each start*Playback function to whatever route it
+  // was actually called with — read back once 'playing' genuinely fires
+  // (see playChannel) so the route that ACTUALLY worked gets remembered,
+  // not just whichever one was tried first.
+  let activeRouteIdx = 0;
+
   // ---------- Channel health check (reachability only, never plays) ----------
   // Tests a channel through the exact same route chain playback uses —
   // direct, then your Worker, then the public fallbacks — recording what
@@ -2061,46 +2137,137 @@
   // ---------- Route racing (speed) ----------
   // Sequentially trying direct -> your Worker -> codetabs -> allorigins
   // means a channel whose *fast* route (direct) has started failing pays
-  // its full manifestLoadingTimeOut (8s) before even starting the *next*
-  // attempt — the exact "used to start instantly, now takes forever"
-  // symptom. Racing direct and your Worker concurrently instead means
-  // startup latency is bounded by whichever of the two actually works,
-  // not their sum. Public proxies are deliberately excluded from the
-  // race (only tried after, sequentially) since they're shared/rate-
-  // limited services — firing them on every single channel switch just
-  // to shave latency isn't worth burning through their quota.
-  const RACE_TIMEOUT = 7500;
-  async function raceRoutes(ch, candidateRoutes){
+  // its full manifestLoadingTimeOut (9s+) before even starting the *next*
+  // attempt — the exact "some channels take a long time to load" symptom.
+  // Probing ALL applicable routes concurrently instead means startup
+  // latency is bounded by whichever route actually works fastest, not by
+  // the sum of every failing one's timeout along the way.
+  //
+  // Public proxies are still handled carefully rather than blasted on
+  // every single channel switch (they're shared/rate-limited services) —
+  // they're fired in a second, DELAYED tier that only kicks off if the
+  // fast/trusted tier (direct + your own Worker) hasn't already won by
+  // then. This is also what "prioritise secure source" means in practice
+  // here: the channel's own direct link and your own Worker are both
+  // trusted, unshared routes under your control, so they get a head
+  // start and win outright whenever they're capable of winning at all —
+  // a public proxy only ever gets used when both of those have genuinely
+  // failed or are still stalling.
+  const ROUTE_PROBE_TIMEOUT = 6500;   // overall budget for the whole probe before giving up and falling back to the old sequential cascade
+  const DELAYED_TIER_STAGGER = 1200;  // how long the trusted tier gets to win outright before public proxies are even attempted
+  function raceForBestRoute(ch, immediateCandidates, delayedCandidates){
     const isHls = /\.m3u8($|\?)/i.test(ch.url);
-    const attempt = async (routeIdx) => {
-      const controller = new AbortController();
-      const timer = setTimeout(()=>controller.abort(), RACE_TIMEOUT);
-      try{
-        const res = await fetch(routedUrl(ch.url, routeIdx), {signal: controller.signal});
-        if(!res.ok) throw new Error('bad status');
-        if(isHls){
-          const text = await res.text();
-          if(!/^\s*#EXTM3U/i.test(text)) throw new Error('not a playlist');
-        }
-        return routeIdx;
-      } finally { clearTimeout(timer); }
+    const controller = new AbortController();
+    let resolved = false;
+    let settleWinner;
+    const winnerPromise = new Promise(resolve=>{ settleWinner = resolve; });
+
+    const attempt = (routeIdx) => {
+      fetch(routedUrl(ch.url, routeIdx), {signal: controller.signal})
+        .then(async res=>{
+          if(!res.ok) throw new Error('bad status');
+          if(isHls){
+            const text = await res.text();
+            if(!/^\s*#EXTM3U/i.test(text)) throw new Error('not a playlist');
+          }
+          if(!resolved){
+            resolved = true;
+            controller.abort(); // we have a winner — no reason to keep spending public-proxy quota or mobile data on the rest
+            settleWinner(routeIdx);
+          }
+        })
+        .catch(()=>{ /* this route loses the race; another candidate (or the timeout) settles things */ });
     };
-    const results = await Promise.allSettled(candidateRoutes.map(attempt));
-    // Prefer the earliest-listed route among the ones that actually
-    // succeeded, so "direct" still wins over "your Worker" when both are
-    // fine — keeping behavior identical to today for the common case.
-    for(const routeIdx of candidateRoutes){
-      const r = results[candidateRoutes.indexOf(routeIdx)];
-      if(r.status === 'fulfilled') return routeIdx;
-    }
-    return null;
+
+    immediateCandidates.forEach(attempt);
+    const delayedTimer = setTimeout(()=>{
+      if(!resolved) delayedCandidates.forEach(attempt);
+    }, DELAYED_TIER_STAGGER);
+
+    const timeoutPromise = new Promise(resolve=>{
+      setTimeout(()=>{
+        clearTimeout(delayedTimer);
+        if(!resolved) controller.abort();
+        resolve(null);
+      }, ROUTE_PROBE_TIMEOUT);
+    });
+
+    return Promise.race([winnerPromise, timeoutPromise]);
   }
 
 
+  // ---------- Manual quality picker ----------
+  // Only meaningful for hls.js — that's the only backend here with a
+  // JS-controllable list of renditions. Native Safari HLS hands quality
+  // selection entirely to the OS's own decode pipeline with no equivalent
+  // API to override it from script, and mpegts.js plays a single raw TS
+  // stream with no renditions to choose between at all — so the button
+  // stays hidden for both and only appears once hls.js actually reports
+  // more than one level for the current channel.
+  function hideQualityMenu(){
+    qualityBtn.style.display = 'none';
+    qualityBtn.classList.remove('is-open');
+    qualityPanel.style.display = 'none';
+    qualityPanel.innerHTML = '';
+  }
+
+  function renderQualityOptions(hlsInstance){
+    const current = hlsInstance.currentLevel; // -1 means "Auto" (ABR-controlled)
+    const levels = hlsInstance.levels
+      .map((lvl, i)=>({index:i, height:lvl.height||0, bitrate:lvl.bitrate||0}))
+      .sort((a,b)=> b.height - a.height || b.bitrate - a.bitrate);
+    const items = [{index:-1, label:'Auto'}].concat(levels.map(l=>({
+      index:l.index,
+      label: l.height ? `${l.height}p` : (l.bitrate ? `${Math.round(l.bitrate/1000)} kbps` : `Level ${l.index+1}`)
+    })));
+    qualityPanel.innerHTML = '';
+    items.forEach(item=>{
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'quality-option' + (current === item.index ? ' is-selected' : '');
+      btn.textContent = item.label;
+      btn.addEventListener('click', ()=>{
+        hlsInstance.currentLevel = item.index;
+        qualityPanel.style.display = 'none';
+        qualityBtn.classList.remove('is-open');
+        showToast(item.index === -1 ? 'Quality set to Auto' : `Quality set to ${item.label}`);
+      });
+      qualityPanel.appendChild(btn);
+    });
+  }
+
+  function setupQualityMenu(hlsInstance){
+    // Fewer than 2 levels means there's nothing to actually pick between —
+    // showing a picker with just "Auto" and one option would be a menu
+    // that does nothing, so it stays hidden exactly like the no-HLS.js
+    // cases above.
+    if(!hlsInstance.levels || hlsInstance.levels.length < 2){
+      hideQualityMenu();
+      return;
+    }
+    qualityBtn.style.display = '';
+    renderQualityOptions(hlsInstance);
+    qualityBtn.onclick = (e)=>{
+      e.stopPropagation();
+      const opening = qualityPanel.style.display === 'none' || !qualityPanel.style.display;
+      if(opening) renderQualityOptions(hlsInstance); // refresh the checkmark in case ABR auto-switched levels since last opened
+      qualityPanel.style.display = opening ? 'flex' : 'none';
+      qualityBtn.classList.toggle('is-open', opening);
+    };
+  }
+  document.addEventListener('click', (e)=>{
+    if(qualityPanel.style.display !== 'none' && !qualityPanel.contains(e.target) && e.target !== qualityBtn){
+      qualityPanel.style.display = 'none';
+      qualityBtn.classList.remove('is-open');
+    }
+  });
+
   // log the real reason and step to the next route before giving up.
   function startHlsPlayback(ch, token, routeIdx){
+    activeRouteIdx = routeIdx;
     if(hls){ hls.destroy(); hls = null; }
     if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
+    hideQualityMenu(); // reset until the new instance's manifest actually parses — avoids showing the previous route's/channel's stale level list for a moment
     // Smaller buffer targets on mobile — 30s of forward+back buffer is a
     // meaningful chunk of memory to allocate in the same instant hls.js
     // is also standing up MediaSource, fetching the manifest, and
@@ -2156,10 +2323,22 @@
     });
     hls.loadSource(ch.url);
     hls.attachMedia(video);
-    // Tracks in-place recovery attempts (recoverMediaError / startLoad) for
-    // THIS route so a channel that keeps re-erroring in a tight loop still
-    // eventually gives up and moves on, instead of recovering forever.
-    let inPlaceRecoveries = 0;
+    hls.on(Hls.Events.MANIFEST_PARSED, ()=>{
+      if(token !== playbackToken) return;
+      setupQualityMenu(hls);
+    });
+    hls.on(Hls.Events.LEVEL_SWITCHED, ()=>{
+      if(token !== playbackToken || qualityPanel.style.display === 'none') return;
+      renderQualityOptions(hls); // keep the checkmark accurate live if the panel's open while ABR auto-switches
+    });
+    // Tracks in-place recovery attempts for THIS route, separately per
+    // error type, so a channel that keeps re-erroring in a tight loop
+    // still eventually gives up and moves on instead of recovering
+    // forever, and so a media-error budget being spent doesn't also
+    // eat into the network-error budget (or vice versa).
+    let mediaErrorRecoveries = 0;
+    let networkErrorRecoveries = 0;
+    let audioCodecSwapped = false;
     const MAX_IN_PLACE_RECOVERIES = 3;
     hls.on(Hls.Events.ERROR, (evt, data)=>{
       if(token !== playbackToken || !data.fatal) return;
@@ -2178,19 +2357,38 @@
       // PLAYBACK_ROUTES list for a problem no route change could ever
       // fix — the likely real cause behind channels that "used to play
       // fine, then died" without ever changing servers.
-      if(data.type === Hls.ErrorTypes.MEDIA_ERROR && inPlaceRecoveries < MAX_IN_PLACE_RECOVERIES){
-        inPlaceRecoveries++;
-        console.warn(`Recovering "${ch.name}" from a media error in place (attempt ${inPlaceRecoveries}/${MAX_IN_PLACE_RECOVERIES}) — not a route problem.`);
+      if(data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < MAX_IN_PLACE_RECOVERIES){
+        mediaErrorRecoveries++;
+        // A SECOND consecutive media error on the same route, right after
+        // a plain recoverMediaError() already ran once, is the specific,
+        // well-known shape of an audio codec/decoder ("audio sink")
+        // failure disguising itself as a generic MediaSource error — the
+        // video side is usually fine; it's the audio decoder rejecting
+        // frames it can't handle (an unexpected AAC profile, an audio
+        // codec change mid-stream, etc). Plain recoverMediaError() alone
+        // just re-primes the same decoder with the same incompatible
+        // audio and fails the same way again. Swapping the audio codec
+        // once before recovering is hls.js's own documented fix for
+        // exactly this — genuinely a player/decode-side problem, not the
+        // route, so this stays in place rather than falling through to
+        // the route cascade below.
+        if(mediaErrorRecoveries === 2 && !audioCodecSwapped){
+          audioCodecSwapped = true;
+          console.warn(`"${ch.name}" hit a repeat media error — swapping audio codec before recovering (likely an audio decoder/sink issue, not the route).`);
+          hls.swapAudioCodec();
+        } else {
+          console.warn(`Recovering "${ch.name}" from a media error in place (attempt ${mediaErrorRecoveries}/${MAX_IN_PLACE_RECOVERIES}) — not a route problem.`);
+        }
         hls.recoverMediaError();
         return;
       }
-      if(data.type === Hls.ErrorTypes.NETWORK_ERROR && inPlaceRecoveries < MAX_IN_PLACE_RECOVERIES){
+      if(data.type === Hls.ErrorTypes.NETWORK_ERROR && networkErrorRecoveries < MAX_IN_PLACE_RECOVERIES){
         // A network error that's merely a transient blip (brief wifi/cell
         // hiccup, a single dropped segment) recovers cleanly with
         // startLoad() on the SAME route; only actually-dead routes need to
         // fall through to the route cascade below.
-        inPlaceRecoveries++;
-        console.warn(`Retrying "${ch.name}" on the same route (attempt ${inPlaceRecoveries}/${MAX_IN_PLACE_RECOVERIES}) before giving up on it.`);
+        networkErrorRecoveries++;
+        console.warn(`Retrying "${ch.name}" on the same route (attempt ${networkErrorRecoveries}/${MAX_IN_PLACE_RECOVERIES}) before giving up on it.`);
         hls.startLoad();
         return;
       }
@@ -2220,9 +2418,11 @@
   // fragments MSE can actually play, so trying it before giving up on a
   // route (rather than only after exhausting all of them) is what
   // actually recovers these channels instead of just failing faster.
-  function startMpegtsPlayback(ch, token, routeIdx, onFail){
+  function startMpegtsPlayback(ch, token, routeIdx, onFail, retriedMediaError){
+    activeRouteIdx = routeIdx;
     if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
     if(hls){ hls.destroy(); hls = null; }
+    hideQualityMenu(); // mpegts.js plays a single fixed-bitrate stream — no renditions to pick between
     if(!window.mpegts || !mpegts.getFeatureList().mseLivePlayback){ onFail(); return; }
     video.removeAttribute('src'); video.load();
     // mpegts.js does NOT trim its SourceBuffer for live streams unless
@@ -2249,10 +2449,24 @@
       stashInitialSize: isMobile ? 128 : undefined
     });
     mpegtsPlayer.attachMediaElement(video);
-    mpegtsPlayer.on(mpegts.Events.ERROR, ()=>{
+    mpegtsPlayer.on(mpegts.Events.ERROR, (errType, errDetail)=>{
       if(token !== playbackToken) return;
-      console.warn(`mpegts.js playback failed for "${ch.name}" via route ${routeIdx}`);
+      console.warn(`mpegts.js playback failed for "${ch.name}" via route ${routeIdx}:`, errType, errDetail || '');
       if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
+      // mpegts.js's MediaError is the same category as hls.js's
+      // MEDIA_ERROR — a decode/audio-sink problem with THIS route's
+      // bytes (a raw-TS source with an audio codec mpegts.js's own
+      // demuxer/decoder path chokes on), not proof the route itself is
+      // bad. One fresh attempt on the SAME route recovers a transient
+      // instance of this instead of immediately burning a whole
+      // PLAYBACK_ROUTES hop on a problem the route can't fix. mpegts.js
+      // has no codec-swap equivalent to hls.js's, so a clean
+      // re-creation of the player is the closest available in-place fix.
+      if(errType === mpegts.ErrorTypes.MEDIA_ERROR && !retriedMediaError){
+        console.warn(`Retrying "${ch.name}" on the same route after a media/decode error — not a route problem.`);
+        startMpegtsPlayback(ch, token, routeIdx, onFail, true);
+        return;
+      }
       onFail();
     });
     try{
@@ -2271,6 +2485,8 @@
   // over a long viewing session.
   let pendingLoadedMetadataHandler = null;
   function startDirectPlayback(ch, token, routeIdx){
+    activeRouteIdx = routeIdx;
+    hideQualityMenu(); // native <video> playback (Safari's own HLS engine, or a plain non-HLS src) has no JS-controllable rendition list
     const tryNextRoute = () => {
       if(routeIdx < PLAYBACK_ROUTES.length - 1){
         showToast(`"${ch.name}" was blocked — trying another route…`);
@@ -2295,6 +2511,24 @@
       video.play().catch(()=>{});
     };
     video.addEventListener('loadedmetadata', pendingLoadedMetadataHandler, {once:true});
+  }
+
+  // Records the outgoing channel as "previous" (for the recall/P button)
+  // right before switching activePlayingChannelId to the new one — but
+  // only for a genuine channel change. Without the id-equality guard, an
+  // in-place restart of the SAME channel (a route retry, or the stall
+  // watchdog calling playChannel(activeIndex) again) would overwrite
+  // "previous" with the channel itself, making recall a no-op right after
+  // any automatic recovery.
+  function setActiveChannel(ch, idx){
+    if(activePlayingChannelId != null && activePlayingChannelId !== ch.id){
+      previousPlayingChannelId = activePlayingChannelId;
+      recallBtn.style.display = '';
+      const prevCh = allChannels.find(c => c.id === previousPlayingChannelId);
+      recallBtn.title = prevCh ? `Recall "${prevCh.name}"` : 'Recall previous channel';
+    }
+    activeIndex = idx;
+    activePlayingChannelId = ch.id;
   }
 
   async function playChannel(idx){
@@ -2349,8 +2583,7 @@
         // CORS proxy), so there's no "real attempt" to make beyond what
         // was already tried above. Message immediately with the honest
         // reason rather than pretending to try something that can't work.
-        activeIndex = idx;
-        activePlayingChannelId = ch.id;
+        setActiveChannel(ch, idx);
         markActiveBubble();
         playbackToken++;
         maybeShowGuide(ch);
@@ -2369,14 +2602,21 @@
       // other channel that doesn't work.
     }
 
-    activeIndex = idx;
-    activePlayingChannelId = ch.id;
+    setActiveChannel(ch, idx);
     markActiveBubble();
     playbackToken++;
     const token = playbackToken;
     let playbackStarted = false;
     video.addEventListener('playing', function onPlaying(){
-      if(playbackToken === token) playbackStarted = true;
+      if(playbackToken === token){
+        playbackStarted = true;
+        // The route active at the moment playback genuinely started is
+        // the one that actually worked — remember it against this
+        // channel's hostname so the next channel on the same host (this
+        // one included, next time) can start there directly instead of
+        // rediscovering it from route 0.
+        rememberHostRoute(ch.url, activeRouteIdx);
+      }
       video.removeEventListener('playing', onPlaying);
     });
 
@@ -2412,11 +2652,18 @@
     const isInsecure = window.location.protocol === 'https:' && /^http:\/\//i.test(ch.url);
     const defaultStartRoute = isInsecure ? 1 : 0;
     const hasCachedRoute = ch.checked === 'ok' && typeof ch.checkedRoute === 'number';
+    // Priority: an explicit per-channel "Check channels" result (most
+    // specific — this exact URL, not just its host) beats the automatic
+    // per-host memory learned from ordinary playback, which beats the
+    // plain http(s)/insecure-source default.
+    const learnedHostRoute = hostRouteFor(ch.url);
     const startRoute = tryHomeRelay
       ? HOME_RELAY_ROUTE_IDX
       : hasCachedRoute
         ? Math.max(ch.checkedRoute, defaultStartRoute)
-        : defaultStartRoute;
+        : learnedHostRoute != null
+          ? Math.max(learnedHostRoute, defaultStartRoute)
+          : defaultStartRoute;
     if(tryHomeRelay){
       showToast(`"${ch.name}" needs your home relay — trying that now.`);
     } else if(isInsecure && startRoute === defaultStartRoute && defaultStartRoute > 0){
@@ -2450,27 +2697,39 @@
       startDirectPlayback(ch, token, startRoute);
     }
 
-    // Hedge against a slow route cascade: if this channel hasn't been
-    // health-checked yet, race "direct" against "your Worker" in the
-    // background while the eager attempt above is already underway. If
-    // the eager attempt hasn't succeeded by the time the race resolves
-    // and the race found a *different* working route, jump straight to
-    // it instead of waiting out however many more failed hops remain —
-    // this is what actually shortens "used to be instant, now slow" for
-    // a channel whose fast route just stopped working, without adding
-    // any latency to the common case where the eager attempt just works.
-    // Skipped on mobile: it's a speed nicety for an uncommon case, and
-    // firing extra concurrent network requests right at the exact moment
-    // hls.js is also starting up works against reducing peak load then.
-    if(!hasCachedRoute && MY_PROXY_URL && !tryHomeRelay && window.innerWidth > 640){
-      const candidates = [defaultStartRoute, PLAYBACK_ROUTES.findIndex((r,i)=> i>defaultStartRoute && ROUTE_LABELS[i]==='your Worker')].filter(i=>i>=0);
-      if(candidates.length > 1){
-        raceRoutes(ch, candidates).then(winner=>{
-          if(playbackToken !== token || playbackStarted || winner === null || winner === startRoute) return;
-          if(useHls) startHlsPlayback(ch, token, winner);
-          else startDirectPlayback(ch, token, winner);
-        });
-      }
+    // Hedge against a slow route cascade: while the eager attempt above is
+    // already underway, race EVERY applicable route in the background —
+    // not just "direct" vs "your Worker" as before. If the eager attempt
+    // hasn't succeeded by the time the race resolves and it found a
+    // *different* working route, jump straight to it instead of waiting
+    // out however many more failed hops the sequential cascade still has
+    // left — this is the actual fix for "some channels take a long time
+    // to load": today's slowness comes from hls.js paying its own full
+    // manifestLoadingTimeOut (9s+) on each bad route in turn before the
+    // cascade even tries the next one, while a plain probe fetch fails a
+    // dead route in a fraction of that time.
+    //
+    // Trusted routes (direct + your own Worker) go out immediately;
+    // shared/rate-limited public proxies are deliberately held back for
+    // DELAYED_TIER_STAGGER (see raceForBestRoute) so they only ever get
+    // used when the trusted tier has genuinely failed or is still
+    // stalling — this is "prioritise secure source" in practice: your own
+    // unshared routes always get the first, uncontested shot at winning.
+    //
+    // Skipped once a health check or learned host route already point
+    // somewhere specific — that's already-verified information, not a
+    // blind guess, so there's nothing to hedge against.
+    if(!hasCachedRoute && !tryHomeRelay){
+      const workerRouteIdx = PLAYBACK_ROUTES.findIndex((r,i)=> i>=defaultStartRoute && ROUTE_LABELS[i]==='your Worker');
+      const immediateCandidates = [defaultStartRoute, workerRouteIdx].filter((v,i,arr)=> v>=0 && arr.indexOf(v)===i);
+      const delayedCandidates = PLAYBACK_ROUTES
+        .map((r,i)=>i)
+        .filter(i => i >= defaultStartRoute && i !== HOME_RELAY_ROUTE_IDX && !immediateCandidates.includes(i));
+      raceForBestRoute(ch, immediateCandidates, delayedCandidates).then(winner=>{
+        if(playbackToken !== token || playbackStarted || winner === null || winner === startRoute) return;
+        if(useHls) startHlsPlayback(ch, token, winner);
+        else startDirectPlayback(ch, token, winner);
+      });
     }
 
     // scroll active bubble into view
@@ -2488,6 +2747,19 @@
     if(filtered.length===0) return;
     let idx = (activeIndex+1) % filtered.length;
     while(idx >= renderedCount && renderedCount < filtered.length) renderMore();
+    playChannel(idx);
+  });
+  recallBtn.addEventListener('click', ()=>{
+    if(previousPlayingChannelId == null) return;
+    // Recall only works against the currently filtered list (same
+    // constraint prevBtn/nextBtn already have) — if the previous channel
+    // got filtered out since you left it, there's no index to jump to.
+    const idx = filtered.findIndex(c => c.id === previousPlayingChannelId);
+    if(idx === -1){
+      showToast('Previous channel is filtered out of the current list — clear filters to recall it.');
+      return;
+    }
+    if(idx >= renderedCount) renderMore();
     playChannel(idx);
   });
 
