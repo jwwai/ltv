@@ -14,13 +14,36 @@
 <link rel="preconnect" href="https://api.codetabs.com">
 <link rel="preconnect" href="https://api.allorigins.win">
 <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
-<!-- HEVC/H.265 fallback decoder's CDN hosts — see the module script below. -->
-<link rel="preconnect" href="https://esm.sh" crossorigin>
-<link rel="preconnect" href="https://unpkg.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js" defer></script>
+<script>
+  // ---------- Conditional MSE-fallback loading (iPad/Safari speed) ----------
+  // Native-HLS browsers — Safari everywhere: macOS, iOS, iPadOS — never
+  // touch hls.js, mpegts.js, or the HEVC WASM fallback module below at
+  // all. nativeHlsSupport wins first and always, whenever it's available
+  // (see playChannel further down in the main script), and native
+  // <video src> playback bypasses MediaSource entirely — meaning none of
+  // these three would ever even run on such a device, let alone need to.
+  // Loading ~100KB+ of hls.js/mpegts.js plus a 236KB WASM HEVC decoder
+  // (plus warming up DNS/TLS for hosts only those need) unconditionally
+  // on a device that can never use any of them is pure wasted bandwidth,
+  // parse time, and (for the WASM module) compile time — all of it
+  // competing for the exact same connection pool and CPU as the actual
+  // playlist fetch and first channel's own network request, right at the
+  // moment that matters most for how fast the app feels to open. This is
+  // very likely the real cause behind "slow to load initially, but only
+  // on iPad" — every other device in this app's design already needs
+  // hls.js as its primary engine, so this optimization is invisible
+  // there; iPad is the one platform where all of this was being fetched
+  // for code that could never run.
+  window.__needsMseFallbacks = !document.createElement('video').canPlayType('application/vnd.apple.mpegurl');
+  if(window.__needsMseFallbacks){
+    document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js" defer><\/script>');
+    document.write('<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js" defer><\/script>');
+    document.write('<link rel="preconnect" href="https://esm.sh" crossorigin>');
+    document.write('<link rel="preconnect" href="https://unpkg.com" crossorigin>');
+  }
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js" defer></script>
 <script>
   // The Cast SDK calls this by name once it's ready — has to be a real
   // global (not something inside the app's own IIFE below), and has to
@@ -69,18 +92,27 @@
   // fails to load for any reason, it fails soft — playback just falls
   // back to today's behavior (audio-only + the existing codec-support
   // toast) instead of breaking anything else in the app.
-  window.__hevcInterceptReady = import('https://esm.sh/@hevcjs/core@1')
-    .then(({ installMSEIntercept }) => installMSEIntercept({
-      workerUrl: 'https://unpkg.com/@hevcjs/core@1/dist/transcode-worker.js',
-      wasmUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.js',
-      wasmBinaryUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.wasm',
-    }))
-    .then(()=>{ console.info('HEVC fallback decoder ready.'); window.__hevcInterceptResolved = true; return true; })
-    .catch(e=>{
-      console.warn('HEVC fallback decoder failed to load — HEVC channels will fall back to the VLC prompt instead.', e);
-      window.__hevcInterceptResolved = false;
-      return false;
-    });
+  //
+  // Skipped entirely on native-HLS browsers (window.__needsMseFallbacks
+  // === false, set synchronously in <head> above) — those decode HEVC
+  // via the OS's own hardware pipeline already, and native <video src>
+  // playback never touches MediaSource.addSourceBuffer() at all, so this
+  // patch would be 100% inert there even if it did load. No point
+  // fetching a 236KB WASM binary for code that could never run.
+  window.__hevcInterceptReady = !window.__needsMseFallbacks
+    ? Promise.resolve(false).then(v=>{ window.__hevcInterceptResolved = false; return v; })
+    : import('https://esm.sh/@hevcjs/core@1')
+      .then(({ installMSEIntercept }) => installMSEIntercept({
+        workerUrl: 'https://unpkg.com/@hevcjs/core@1/dist/transcode-worker.js',
+        wasmUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.js',
+        wasmBinaryUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.wasm',
+      }))
+      .then(()=>{ console.info('HEVC fallback decoder ready.'); window.__hevcInterceptResolved = true; return true; })
+      .catch(e=>{
+        console.warn('HEVC fallback decoder failed to load — HEVC channels will fall back to the VLC prompt instead.', e);
+        window.__hevcInterceptResolved = false;
+        return false;
+      });
 </script>
 <style>
   :root{
@@ -278,6 +310,7 @@
   .icon-btn:active{transform:scale(.92);}
   .icon-btn svg{width:17px;height:17px;}
   .icon-btn.is-muted{color:var(--danger);opacity:1;}
+  .icon-btn.is-active{color:var(--accent);opacity:1;}
   .round-btn{border:1.4px solid rgba(255,255,255,.55);border-radius:50%;}
   .round-btn svg{width:13px;height:13px;}
   .recall-btn{
@@ -601,6 +634,9 @@
           </button>
           <input class="vol-slider" id="volSlider" type="range" min="0" max="1" step="0.01" value="1">
         </div>
+        <button class="icon-btn" id="audioFxBtn" title="Enhanced audio (bass, presence, stereo width)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0118 0"/><path d="M3 12a9 9 0 009 9"/><path d="M12 3a9 9 0 019 9"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/></svg>
+        </button>
 
         <button class="icon-btn round-btn" id="prevBtn" title="Previous channel">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM19 5v14l-9-7 9-7z"/></svg>
@@ -741,6 +777,19 @@
   const SOURCE_STORAGE_KEY = 'livetv_source_v2';
   const BATCH = window.innerWidth <= 640 ? 24 : 48;
   const DEFAULT_CHANNEL_NAME = 'Vevo Pop';
+  // Touch capability, not screen width — an iPad is comfortably wider
+  // than the 640px "mobile" cutoff used elsewhere in this file (which is
+  // legitimately about display size / rendering batch counts, left
+  // alone), but for the specific question "should something heavy start
+  // competing for resources the instant the page opens", iPad shares
+  // every reason a phone does: it plays through the same native-HLS-only
+  // pipeline as phones (not hls.js), similar memory/network profile, and
+  // — confirmed directly — auto-playing a default channel immediately
+  // after the playlist finishes loading produced exactly the
+  // "started, then stopped" pattern on iPad that this same deferral
+  // already exists to prevent on phones; it just wasn't reaching iPad
+  // because it was gated on screen width alone.
+  const isHandheldDevice = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
 
   // Optional: your own streaming proxy (see cloudflare-worker-proxy.js in
   // this repo). If set, it's tried before the shared public proxies below —
@@ -811,6 +860,7 @@
   const toastEl = el('toast');
   const volSlider = el('volSlider');
   const muteBtn = el('muteBtn');
+  const audioFxBtn = el('audioFxBtn');
   const volIcon = el('volIcon');
   const guidePanel = el('guidePanel');
   const guideClock = el('guideClock');
@@ -1441,16 +1491,17 @@
     // get immediately jumped to wherever "Vevo Pop" (or whatever matches)
     // happens to land in it.
     //
-    // On mobile specifically, skipped entirely rather than staggered —
-    // starting hls.js (manifest fetch, MediaSource setup, buffering,
-    // decoding) is real, separate cost on top of everything else that
-    // happens right at page open, and repeated reports of a reload a few
-    // seconds after opening — right in the window video playback would be
-    // ramping up — point at it directly. Letting the person tap a channel
-    // themselves once the page has actually settled removes that cost
-    // from the critical opening window entirely, rather than just
-    // shifting it a frame later.
-    if(autoSelect && window.innerWidth > 640){
+    // On handheld devices specifically (phones AND tablets — see
+    // isHandheldDevice above), skipped entirely rather than staggered —
+    // starting playback (manifest fetch, buffering, decoding — whichever
+    // pipeline a given device uses) is real, separate cost on top of
+    // everything else that happens right at page open, and repeated
+    // reports of a reload/stall a few seconds after opening — right in
+    // the window playback would be ramping up — point at it directly.
+    // Letting the person tap a channel themselves once the page has
+    // actually settled removes that cost from the critical opening
+    // window entirely, rather than just shifting it a frame later.
+    if(autoSelect && !isHandheldDevice){
       selectDefaultChannel();
     }
 
@@ -2875,6 +2926,15 @@
       showToast(`"${ch.name}" doesn't have a usable stream link.`);
       return;
     }
+    // Piggybacks on this call being a real user gesture (a bubble tap,
+    // prev/next, recall) to lazily stand up the audio enhancement graph
+    // — see buildAudioFxGraph below — rather than requiring an extra,
+    // separate tap on that button first when it's already on by default.
+    // Harmless when this call ISN'T a real gesture (auto-select on
+    // desktop, an internal retry): AudioContext creation itself doesn't
+    // need one, only resuming a suspended one does, and that's retried
+    // from the button's own click handler and other real interactions.
+    if(audioFxEnabled) buildAudioFxGraph();
     // A genuinely NEW channel selection (as opposed to an internal retry
     // replaying this same channel — a route hop, the stall watchdog, or
     // handleRouteExhaustion's own delayed retry below) resets the
@@ -3185,6 +3245,137 @@
       lastVolume = video.volume || 1;
       video.muted = true;
     }
+  });
+
+  // ---------- Audio enhancement (Web Audio API) ----------
+  // Not literally Dolby — that's licensed, proprietary tech with no open
+  // implementation to build on — but real client-side DSP aimed at the
+  // same goal: fuller, richer sound instead of a flat stereo downmix
+  // straight through. Built once, lazily, on the first real user
+  // interaction (an AudioContext stays 'suspended' until a user gesture
+  // in most browsers anyway) and reused for the rest of the page's
+  // life — the <video> element is a single persistent instance reused
+  // across every channel switch, and a given HTMLMediaElement can only
+  // ever be handed to ONE MediaElementAudioSourceNode for its whole
+  // lifetime, so this graph is built exactly once, not per channel.
+  //
+  // None of the nodes used here (GainNode, BiquadFilterNode,
+  // DynamicsCompressorNode, ChannelSplitter/MergerNode) expose raw
+  // sample data to JavaScript the way an AnalyserNode or an AudioWorklet
+  // reading samples would — so none of this needs CORS headers on the
+  // underlying stream to work. That matters a lot here specifically:
+  // most channels play through a proxy (see PLAYBACK_ROUTES), and this
+  // needs to keep working unconditionally regardless of route.
+  const AUDIO_FX_STORAGE_KEY = 'livetv_audiofx_v1';
+  const AUDIO_FX_WIDTH = 1.3; // stereo widening factor — tasteful, not a gimmicky wall-of-phase effect
+  let audioFxEnabled = localStorage.getItem(AUDIO_FX_STORAGE_KEY) !== 'off'; // on by default
+  let audioFxGraph = null; // built lazily; null until the first real interaction
+
+  function buildAudioFxGraph(){
+    if(audioFxGraph) return audioFxGraph;
+    if(!(window.AudioContext || window.webkitAudioContext)) return null;
+    try{
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = ctx.createMediaElementSource(video);
+
+      // Gentle low-shelf warmth — fuller low end without turning into a
+      // boomy "bass boost" gimmick.
+      const bass = ctx.createBiquadFilter();
+      bass.type = 'lowshelf'; bass.frequency.value = 120; bass.gain.value = 4;
+
+      // Gentle high-shelf lift — adds clarity/"air" to dialogue and
+      // detail that a compressed stereo broadcast downmix often loses.
+      const presence = ctx.createBiquadFilter();
+      presence.type = 'highshelf'; presence.frequency.value = 9000; presence.gain.value = 2.5;
+
+      // Mid/side stereo widening: split into mid=(L+R)/2 and
+      // side=(L-R)/2, widen the side signal, recombine as
+      // L'=mid+side, R'=mid-side. Genuinely widens the image on real
+      // stereo content; a mono source has ~zero side signal to begin
+      // with, so this is harmless there rather than doing anything odd.
+      const splitter = ctx.createChannelSplitter(2);
+      const merger = ctx.createChannelMerger(2);
+
+      const midSum = ctx.createGain(); midSum.gain.value = 0.5;
+      splitter.connect(midSum, 0);
+      splitter.connect(midSum, 1);
+
+      const rInvert = ctx.createGain(); rInvert.gain.value = -1;
+      splitter.connect(rInvert, 1);
+      const sideSum = ctx.createGain(); sideSum.gain.value = 0.5 * AUDIO_FX_WIDTH;
+      splitter.connect(sideSum, 0);
+      rInvert.connect(sideSum);
+
+      const sideInvert = ctx.createGain(); sideInvert.gain.value = -1; // for R' = mid - side
+
+      midSum.connect(merger, 0, 0);  // L' gets mid
+      sideSum.connect(merger, 0, 0); // L' gets +side
+      midSum.connect(merger, 0, 1);  // R' gets mid
+      sideSum.connect(sideInvert);
+      sideInvert.connect(merger, 0, 1); // R' gets -side
+
+      // Broadcast-style leveling — brings up quiet dialogue, keeps loud
+      // moments in check, and generally makes stereo TV audio feel less
+      // flat/inconsistent. Conservative settings so it stays natural
+      // rather than obviously "pumping".
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -24; comp.knee.value = 30; comp.ratio.value = 3;
+      comp.attack.value = 0.005; comp.release.value = 0.25;
+
+      // Final headroom trim — the shelving boosts above can push peaks
+      // close to (or over) 0dB; pulling back a touch here avoids audible
+      // clipping/distortion rather than just hoping the compressor
+      // alone catches everything.
+      const makeup = ctx.createGain();
+      makeup.gain.value = 0.85;
+
+      // Bypass-capable wiring: the source always feeds BOTH a dry (flat)
+      // path and this wet (enhanced) path; only one side's gain is ever
+      // nonzero, so toggling is an instant, click-free crossfade rather
+      // than tearing down/rebuilding the graph (which a given
+      // HTMLMediaElement wouldn't even allow a second time).
+      const dryGain = ctx.createGain();
+      const wetGain = ctx.createGain();
+      source.connect(dryGain);
+      source.connect(bass);
+      bass.connect(presence);
+      presence.connect(splitter);
+      merger.connect(comp);
+      comp.connect(makeup);
+      makeup.connect(wetGain);
+      dryGain.connect(ctx.destination);
+      wetGain.connect(ctx.destination);
+
+      audioFxGraph = { ctx, dryGain, wetGain };
+      applyAudioFxState();
+      return audioFxGraph;
+    }catch(e){
+      console.warn('Audio enhancement unavailable:', e);
+      return null;
+    }
+  }
+
+  function applyAudioFxState(){
+    if(!audioFxGraph) return;
+    const { ctx, dryGain, wetGain } = audioFxGraph;
+    const now = ctx.currentTime;
+    // Short linear ramp instead of an instant jump — avoids an audible
+    // click when toggling mid-playback.
+    dryGain.gain.cancelScheduledValues(now);
+    wetGain.gain.cancelScheduledValues(now);
+    dryGain.gain.linearRampToValueAtTime(audioFxEnabled ? 0 : 1, now + 0.08);
+    wetGain.gain.linearRampToValueAtTime(audioFxEnabled ? 1 : 0, now + 0.08);
+    audioFxBtn.title = audioFxEnabled ? 'Enhanced audio on (bass, presence, stereo width)' : 'Enhanced audio off';
+  }
+
+  audioFxBtn.classList.toggle('is-active', audioFxEnabled); // reflect the stored preference immediately, even before the graph exists
+  audioFxBtn.addEventListener('click', ()=>{
+    audioFxEnabled = !audioFxEnabled;
+    localStorage.setItem(AUDIO_FX_STORAGE_KEY, audioFxEnabled ? 'on' : 'off');
+    audioFxBtn.classList.toggle('is-active', audioFxEnabled);
+    const graph = buildAudioFxGraph();
+    if(graph && graph.ctx.state === 'suspended') graph.ctx.resume();
+    applyAudioFxState();
   });
 
   // ---------- Cast to a nearby device ----------
