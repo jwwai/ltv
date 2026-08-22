@@ -68,51 +68,48 @@
   // MIT-licensed HEVC decoder compiled to WebAssembly (236KB) with a
   // built-in real-time HEVC->H.264 transcoding pipeline. installMSEIntercept
   // patches the browser's own MediaSource.addSourceBuffer() globally —
-  // it's not tied to any specific player library (its README also ships
-  // dash.js/Shaka-specific plugins, but this is the underlying player-
-  // agnostic primitive both of those are built on), so it applies
-  // transparently underneath hls.js here too: hls.js keeps creating
-  // SourceBuffers exactly as it always has, with no idea HEVC was ever
-  // involved. This is genuinely zero-cost when native HEVC decode is
-  // already available (Safari, any browser on macOS, Chrome on
-  // HEVC-capable hardware, etc.) — it probes for real native support
-  // first and only loads/runs the WASM path when that probe fails.
+  // it's not tied to any specific player library, so it applies
+  // transparently underneath hls.js too.
   //
-  // Because the patch is keyed on CODEC, not on any particular channel,
-  // this fixes every HEVC-encoded channel in the app automatically —
-  // there's no per-channel list to maintain, unlike the ffmpeg-relay
-  // transcode option (which remains a valid heavier-duty fallback for
-  // the rare case a device is too underpowered for real-time WASM
-  // transcoding, or WebCodecs H.264 encoding genuinely isn't available).
-  //
-  // window.__hevcInterceptReady is awaited once per channel start inside
-  // startHlsPlayback (see the main script below) before the very first
-  // playback attempt each session, so the patch is guaranteed installed before hls.js ever
-  // creates its first MediaSource. If the CDN is unreachable or this
-  // fails to load for any reason, it fails soft — playback just falls
-  // back to today's behavior (audio-only + the existing codec-support
-  // toast) instead of breaking anything else in the app.
+  // IMPORTANT: this is installed REACTIVELY now, not eagerly on every
+  // page load — it's only ever called from checkForAudioOnlyPlayback in
+  // the main script, once a channel is DEMONSTRABLY playing audio with
+  // no video frame ever appearing after a real grace period. Originally
+  // this installed unconditionally before every single channel's first
+  // play, on the theory that it's a no-op when unneeded — but
+  // @hevcjs/core is a very young, effectively unaudited third-party
+  // library, and patching a core browser API used by EVERY channel's
+  // playback pipeline (not just HEVC ones) on the mere possibility one
+  // might need it is real, unnecessary risk to every ordinary H.264
+  // channel for a fix that's only ever useful for the rare HEVC one.
+  // Reactive installation means ordinary channels never have their
+  // SourceBuffer creation touched by this patch at all — it's isolated
+  // to exactly the channel(s) that actually exhibit the problem.
   //
   // Skipped entirely on native-HLS browsers (window.__needsMseFallbacks
   // === false, set synchronously in <head> above) — those decode HEVC
   // via the OS's own hardware pipeline already, and native <video src>
   // playback never touches MediaSource.addSourceBuffer() at all, so this
-  // patch would be 100% inert there even if it did load. No point
-  // fetching a 236KB WASM binary for code that could never run.
-  window.__hevcInterceptReady = !window.__needsMseFallbacks
-    ? Promise.resolve(false).then(v=>{ window.__hevcInterceptResolved = false; return v; })
-    : import('https://esm.sh/@hevcjs/core@1')
-      .then(({ installMSEIntercept }) => installMSEIntercept({
-        workerUrl: 'https://unpkg.com/@hevcjs/core@1/dist/transcode-worker.js',
-        wasmUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.js',
-        wasmBinaryUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.wasm',
-      }))
-      .then(()=>{ console.info('HEVC fallback decoder ready.'); window.__hevcInterceptResolved = true; return true; })
-      .catch(e=>{
-        console.warn('HEVC fallback decoder failed to load — HEVC channels will fall back to the VLC prompt instead.', e);
-        window.__hevcInterceptResolved = false;
-        return false;
-      });
+  // patch would be 100% inert there even if it did load.
+  window.__installHevcFallback = (function(){
+    let installPromise = null;
+    return function installHevcFallback(){
+      if(installPromise) return installPromise;
+      if(!window.__needsMseFallbacks){ installPromise = Promise.resolve(false); return installPromise; }
+      installPromise = import('https://esm.sh/@hevcjs/core@1')
+        .then(({ installMSEIntercept }) => installMSEIntercept({
+          workerUrl: 'https://unpkg.com/@hevcjs/core@1/dist/transcode-worker.js',
+          wasmUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.js',
+          wasmBinaryUrl: 'https://unpkg.com/@hevcjs/core@1/dist/wasm/hevc-decode.wasm',
+        }))
+        .then(()=>{ console.info('HEVC fallback decoder installed.'); return true; })
+        .catch(e=>{
+          console.warn('HEVC fallback decoder failed to load — falls back to the VLC prompt instead.', e);
+          return false;
+        });
+      return installPromise;
+    };
+  })();
 </script>
 <style>
   :root{
@@ -2574,16 +2571,15 @@
     });
     if(playable) return;
     const isHevc = levelsWithVideo.some(lvl => /^(hvc1|hev1)/i.test(lvl.videoCodec));
-    // MediaSource.isTypeSupported() genuinely doesn't reflect what the
-    // WASM fallback decoder above can do — it only patches
-    // addSourceBuffer() itself, deliberately NOT isTypeSupported()
-    // (hevc.js's own docs note isTypeSupported() "can lie" in the other
-    // direction on some browsers, so it doesn't trust it either). If that
-    // decoder loaded successfully and this is HEVC, defer to the DOM-level
-    // checkForAudioOnlyPlayback backstop instead of flagging this as
-    // broken here — it may well just work.
-    if(isHevc && window.__hevcInterceptResolved) return;
-    const codecNote = isHevc ? ' (HEVC/H.265 — not supported by this browser)' : ` (codec: ${levelsWithVideo[0].videoCodec})`;
+    // For HEVC specifically, defer entirely to the DOM-level
+    // checkForAudioOnlyPlayback backstop rather than flagging this here —
+    // that check is the one that actually tries the WASM fallback
+    // decoder before giving up (see below), and MediaSource.isTypeSupported()
+    // wouldn't reflect what that decoder can do anyway even if we asked
+    // it (it only patches addSourceBuffer() itself, deliberately not
+    // isTypeSupported() — hevc.js's own docs note that check "can lie").
+    if(isHevc) return;
+    const codecNote = ` (codec: ${levelsWithVideo[0].videoCodec})`;
     showToast(`"${ch.name}"'s video${codecNote} won't decode in this browser — audio may still play. Try the VLC button.`);
     markChannelUnplayable(ch, `Video codec not supported by this browser${codecNote} — open in VLC instead`);
   }
@@ -2605,21 +2601,42 @@
   // native HLS, mpegts.js) or why decoding is failing. If audio is
   // clearly progressing but no frame has shown up after a real grace
   // period, that's about as close to direct proof as this can get.
-  // 10s comfortably clears both normal startup buffering AND the WASM
-  // HEVC decoder's own ~2-3s first-segment latency (per its docs) when
-  // that path is the one actually doing the work — so this stays a
-  // reliable signal either way, not just for native decode.
-  const NO_VIDEO_CHECK_DELAY = 10000;
+  //
+  // This is also the ONLY place the HEVC WASM fallback decoder ever gets
+  // installed (see window.__installHevcFallback in <head>) — reactively,
+  // once a channel has DEMONSTRABLY hit this exact problem, not eagerly
+  // for every channel on the chance one might need it. That keeps the
+  // (young, effectively unaudited) third-party patch isolated to only
+  // the channel(s) that actually exhibit the problem — an ordinary H.264
+  // channel always shows a real frame well within the grace period and
+  // never reaches this fallback-install branch at all.
+  const NO_VIDEO_CHECK_DELAY = 10000; // long enough to clear normal startup buffering
   function checkForAudioOnlyPlayback(ch, token){
-    setTimeout(()=>{
+    setTimeout(async ()=>{
       if(token !== playbackToken) return;           // channel switched since — not relevant anymore
       if(video.paused || video.ended) return;        // not actually playing — a different problem (the stall watchdog covers that)
-      if(video.videoWidth > 0 || video.videoHeight > 0) return; // a real frame showed up — genuinely fine, whether native or via the WASM fallback
+      if(video.videoWidth > 0 || video.videoHeight > 0) return; // a real frame showed up — genuinely fine
       if(video.currentTime <= 0) return;             // hasn't actually started progressing at all yet either — not this specific case
-      // Distinguishes "we tried the WASM fallback and it still couldn't
-      // keep up" from "no fallback was even available" — genuinely
-      // different situations worth telling apart in the message.
-      const triedFallback = window.__hevcInterceptResolved === true;
+
+      // First time this specific channel hits this: try the HEVC
+      // fallback decoder and give it one real retry before giving up.
+      // ch._triedHevcFallback lives on the channel object itself (not
+      // reset on channel switches) since codec-ness is a property of the
+      // source, not something that changes — no need to ever re-attempt
+      // this dance for the same channel twice.
+      if(window.__needsMseFallbacks && window.__installHevcFallback && !ch._triedHevcFallback){
+        ch._triedHevcFallback = true;
+        const installed = await window.__installHevcFallback();
+        if(token !== playbackToken) return; // channel changed while installing — this attempt is stale
+        if(installed){
+          showToast(`"${ch.name}" needs the HEVC fallback decoder — retrying…`);
+          const freshIdx = filtered.findIndex(c => c.id === ch.id);
+          if(freshIdx !== -1) playChannel(freshIdx);
+          return;
+        }
+      }
+
+      const triedFallback = ch._triedHevcFallback === true;
       const reason = triedFallback
         ? 'its video still isn\u2019t decoding even with the built-in HEVC fallback decoder — this device may be too slow for real-time software decode'
         : 'its video most likely isn\u2019t decodable in this browser (commonly HEVC/H.265)';
@@ -2629,15 +2646,7 @@
   }
 
   // log the real reason and step to the next route before giving up.
-  async function startHlsPlayback(ch, token, routeIdx){
-    // Make sure the HEVC fallback decoder (if it loaded) is actually
-    // installed before hls.js creates its MediaSource — otherwise a
-    // channel that happens to need it could slip through on the very
-    // first play of the session, before the CDN module has resolved.
-    // Already-resolved after the first call, so this is a no-op wait on
-    // every subsequent channel switch.
-    if(window.__hevcInterceptReady) await window.__hevcInterceptReady;
-    if(token !== playbackToken) return; // channel changed again while we were waiting on that — this attempt is stale, do nothing
+  function startHlsPlayback(ch, token, routeIdx){
     activeRouteIdx = routeIdx;
     if(hls){ hls.destroy(); hls = null; }
     if(mpegtsPlayer){ try{ mpegtsPlayer.destroy(); }catch(e){} mpegtsPlayer = null; }
