@@ -15,30 +15,34 @@
 <link rel="preconnect" href="https://api.allorigins.win">
 <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js" defer></script>
 <script>
-  // ---------- Conditional MSE-fallback loading (iPad/Safari speed) ----------
+  // ---------- Conditional hls.js loading (iPad/Safari speed) ----------
   // Native-HLS browsers — Safari everywhere: macOS, iOS, iPadOS — never
-  // touch hls.js, mpegts.js, or the HEVC WASM fallback module below at
-  // all. nativeHlsSupport wins first and always, whenever it's available
-  // (see playChannel further down in the main script), and native
-  // <video src> playback bypasses MediaSource entirely — meaning none of
-  // these three would ever even run on such a device, let alone need to.
-  // Loading ~100KB+ of hls.js/mpegts.js plus a 236KB WASM HEVC decoder
-  // (plus warming up DNS/TLS for hosts only those need) unconditionally
-  // on a device that can never use any of them is pure wasted bandwidth,
-  // parse time, and (for the WASM module) compile time — all of it
-  // competing for the exact same connection pool and CPU as the actual
-  // playlist fetch and first channel's own network request, right at the
-  // moment that matters most for how fast the app feels to open. This is
-  // very likely the real cause behind "slow to load initially, but only
-  // on iPad" — every other device in this app's design already needs
-  // hls.js as its primary engine, so this optimization is invisible
-  // there; iPad is the one platform where all of this was being fetched
-  // for code that could never run.
+  // touch hls.js or the HEVC WASM fallback module below at all.
+  // nativeHlsSupport wins first and always for .m3u8 sources, whenever
+  // it's available (see playChannel further down in the main script),
+  // and native <video src> playback bypasses MediaSource entirely for
+  // those — meaning hls.js would never even run on such a device, let
+  // alone need to. Loading ~100KB of hls.js plus a 236KB WASM HEVC
+  // decoder unconditionally on a device that could never use either is
+  // pure wasted bandwidth/parse/compile time, competing for the same
+  // connection pool and CPU as the actual playlist fetch and first
+  // channel's own network request, right at the moment that matters most
+  // for how fast the app feels to open.
+  //
+  // mpegts.js is NOT included in this gating (loaded unconditionally
+  // above, always) — this was a real bug in an earlier version of this
+  // check: mpegts.js exists to demux raw, non-HLS MPEG-TS streams
+  // (a plain .ts URL, not .m3u8), and NO browser's native <video>
+  // element supports that natively, Safari included — native HLS
+  // support is a completely separate capability from raw-TS support, so
+  // gating mpegts.js on nativeHlsSupport broke every raw-TS channel
+  // specifically on Safari/iPad, the one place hls.js itself correctly
+  // doesn't need to load.
   window.__needsMseFallbacks = !document.createElement('video').canPlayType('application/vnd.apple.mpegurl');
   if(window.__needsMseFallbacks){
     document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js" defer><\/script>');
-    document.write('<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js" defer><\/script>');
     document.write('<link rel="preconnect" href="https://esm.sh" crossorigin>');
     document.write('<link rel="preconnect" href="https://unpkg.com" crossorigin>');
   }
