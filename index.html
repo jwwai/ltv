@@ -167,6 +167,31 @@
   .body-row{display:flex;gap:18px;align-items:flex-start;}
   .main-col{flex:1;min-width:0;}
 
+  /* ---------- Desktop: only the channel grid scrolls ----------
+     Everything above it — the header, country sidebar, player, and
+     side-col (search/filters/guide) — stays completely fixed in place;
+     only .rail-wrap has its own independent scroll. The page itself
+     (html/body) doesn't scroll at all in this mode, matching the
+     reference design's "sidebar and player never move" behavior. Footer
+     was moved to live inside .rail-wrap (right after the grid) so it
+     scrolls into view at the end of the channel list instead of needing
+     its own fixed slot outside the scrolling area. Mobile/tablet
+     (<=960px) intentionally excluded — a fixed-height, internally-
+     scrolling layout makes sense with room to spare on a wide desktop
+     screen, but would fight with how a phone/tablet's own viewport and
+     on-screen keyboard already behave. */
+  @media (min-width: 961px){
+    html, body{height:100%;overflow:hidden;}
+    .shell{height:100vh;overflow:hidden;display:flex;flex-direction:column;box-sizing:border-box;}
+    .body-row{flex:1;min-height:0;}
+    .main-col{height:100%;display:flex;flex-direction:column;min-height:0;}
+    .rail-head{flex:none;}
+    .rail-wrap{flex:1;min-height:0;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+    .rail-wrap::-webkit-scrollbar{width:8px;}
+    .rail-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:99px;}
+    .country-chip-rail{height:100%;max-height:none;position:static;}
+  }
+
   /* ---------- Header ---------- */
   .wordmark{
     display:flex;align-items:baseline;justify-content:space-between;
@@ -734,15 +759,19 @@
 
   @media (max-width:960px){
     /* Reorders to: header, country chips, video, channel rack,
-       search/filters, guide, footer. .body-row/.main-col replace .shell
+       search/filters, guide. .body-row/.main-col replace .shell
        as the flex containers now (they didn't exist when this rule was
-       first written) — .wordmark and <footer> live outside both,
-       full-width, so they're untouched by any of this; the country chip
-       rail also lives outside .main-col (it's .body-row's other flex
-       item, stacked above it below), so it only needs its own treatment
-       reverted back to a horizontal strip, not an order value. display:
-       contents "unwraps" top-row so its two children (player-frame and
-       side-col) become directly reorderable alongside rail-head/rail-wrap
+       first written) — .wordmark lives outside both, full-width, so
+       it's untouched by any of this; <footer> now lives inside
+       .rail-wrap (scrolls with the channel grid, see the desktop-only
+       fixed-viewport rule above) rather than being a separate top-level
+       section, so it doesn't need an order value either. The country
+       chip rail also lives outside .main-col (it's .body-row's other
+       flex item, stacked above it below), so it only needs its own
+       treatment reverted back to a horizontal strip, not an order value.
+       display:contents "unwraps" top-row so its two children
+       (player-frame and side-col) become directly reorderable alongside
+       rail-head/rail-wrap
        instead of being stuck adjacent to each other as a pair. */
     .body-row{flex-direction:column;}
     .main-col{display:flex;flex-direction:column;width:100%;}
@@ -752,25 +781,32 @@
     .rail-head{order:3;}
     .rail-wrap{order:4;}
     .guide-or-logo{flex:0 0 300px;max-height:300px;height:300px!important;}
-    /* Country rail reverts to a horizontal labeled strip — a vertical
+    /* Country rail reverts to a horizontal strip on mobile — a vertical
        icon-only sidebar (the desktop treatment above) wouldn't leave
-       useful room for anything else on a narrow screen, and the mobile
-       reference design itself shows this as a horizontal row. */
+       useful room for anything else on a narrow screen. Each chip stacks
+       flag on top, name below (matching the reference mobile design)
+       rather than the side-by-side flag+name used on desktop. */
     .country-chip-rail{
       flex:0 0 auto;flex-direction:row;overflow-x:auto;overflow-y:visible;
       max-height:none;position:static;width:100%;padding:2px 20px 12px;
     }
     .country-chip{
-      width:auto;aspect-ratio:auto;padding:7px 12px;border-radius:10px;gap:6px;
+      flex-direction:column;justify-content:center;width:auto;min-width:58px;
+      aspect-ratio:auto;padding:8px 6px;border-radius:10px;gap:4px;
     }
-    .country-chip .chip-label{display:inline;}
+    .country-chip .chip-flag{
+      width:auto;height:auto;background:none;font-size:18px;
+    }
+    .country-chip .chip-label{
+      display:block;font-size:10px;font-weight:600;max-width:58px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    }
     .country-chip .chip-count{
-      display:inline-block;font-size:10px;font-weight:700;color:var(--text-faint);
+      display:inline-block;font-size:9px;font-weight:700;color:var(--text-faint);
       background:rgba(255,255,255,.08);padding:1px 6px;border-radius:10px;
     }
     .country-chip.is-selected .chip-count{color:var(--accent);}
     .chip-fav.is-selected .chip-count{color:#ff5d7a;}
-    .chip-flag{font-size:14px;}
   }
   @media (max-width:640px){
     .filter-row{flex-direction:column;align-items:stretch;}
@@ -1031,15 +1067,14 @@
     <div class="rail" id="rail">
       <div class="rail-loading" id="railStatus"><span class="spinner"></span>Fetching channel list…</div>
     </div>
+    <footer>
+      Streams sourced from the community-maintained <a href="https://github.com/iptv-org/iptv" target="_blank" rel="noopener">iptv-org</a> playlist,
+      guide data combined from <a href="https://epgshare01.online/" target="_blank" rel="noopener">epgshare01</a> and <a href="https://epg.pw/" target="_blank" rel="noopener">epg.pw</a>.
+      Availability of individual streams and guide coverage isn't guaranteed.
+    </footer>
   </div>
   </div>
   </div>
-
-  <footer>
-    Streams sourced from the community-maintained <a href="https://github.com/iptv-org/iptv" target="_blank" rel="noopener">iptv-org</a> playlist,
-    guide data combined from <a href="https://epgshare01.online/" target="_blank" rel="noopener">epgshare01</a> and <a href="https://epg.pw/" target="_blank" rel="noopener">epg.pw</a>.
-    Availability of individual streams and guide coverage isn't guaranteed.
-  </footer>
 
 </div>
 
