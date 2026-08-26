@@ -273,6 +273,11 @@
     border-radius:8px;
   }
   .cast-overlay-btn:hover{background:rgba(10,12,16,.8);}
+  .top-left-overlay{
+    position:absolute;top:10px;left:10px;z-index:15;
+    display:flex;gap:6px;
+  }
+  .top-left-overlay .cast-overlay-btn{position:static;top:auto;right:auto;}
 
   .player-empty{
     position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -673,6 +678,23 @@
       background:var(--bg);
       box-shadow:0 6px 16px rgba(0,0,0,.45);
     }
+    /* .player-frame has overflow:hidden (needed to keep its corners
+       rounded) — which was silently clipping the settings panel
+       whenever its content was taller than the player itself, very
+       likely on mobile specifically: the player's actual pixel height
+       is small on a narrow screen (16:9 at mobile width isn't tall),
+       while the panel's content height stays roughly constant regardless
+       of screen size. Fixed positioning anchored to the viewport instead
+       of the player escapes that clipping entirely — genuinely renders
+       outside the player's bounds now, as a bottom sheet, rather than a
+       popover fighting for room inside it. */
+    .settings-panel{
+      position:fixed;top:auto;bottom:0;left:0;right:0;
+      width:100%;max-width:100%;max-height:75vh;
+      border-radius:16px 16px 0 0;
+      box-shadow:0 -10px 30px rgba(0,0,0,.55);
+      z-index:60;
+    }
   }
 </style>
 </head>
@@ -708,6 +730,15 @@
       <button class="icon-btn cast-overlay-btn" id="castBtn" title="Cast to a nearby device">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V5a1 1 0 011-1h18a1 1 0 011 1v14a1 1 0 01-1 1h-7"/><path d="M2 13a9 9 0 018 8"/><path d="M2 17a5 5 0 014 4"/><circle cx="3" cy="21" r="1" fill="currentColor" stroke="none"/></svg>
       </button>
+
+      <div class="top-left-overlay">
+        <button class="icon-btn cast-overlay-btn" id="vlcBtn" title="Copy the stream link to paste into VLC" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V4a2 2 0 012-2h10"/></svg>
+        </button>
+        <button class="icon-btn cast-overlay-btn" id="resolveBtn" title="Resolve the real stream link (jmp2.uk-style redirect)" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.07 0l2.83-2.83a5 5 0 00-7.07-7.07L11.5 4.5"/><path d="M14 11a5 5 0 00-7.07 0L4.1 13.83a5 5 0 007.07 7.07L12.5 19.5"/></svg>
+        </button>
+      </div>
 
       <div class="player-empty" id="emptyState">
         <div class="glyph">
@@ -778,12 +809,6 @@
             <button type="button" class="settings-action-btn" id="copyLinkBtn">Copy stream link</button>
           </div>
         </div>
-        <button class="icon-btn" id="vlcBtn" title="Copy the stream link to paste into VLC" style="display:none;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V4a2 2 0 012-2h10"/></svg>
-        </button>
-        <button class="icon-btn" id="resolveBtn" title="Resolve the real stream link (jmp2.uk-style redirect)" style="display:none;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.07 0l2.83-2.83a5 5 0 00-7.07-7.07L11.5 4.5"/><path d="M14 11a5 5 0 00-7.07 0L4.1 13.83a5 5 0 007.07 7.07L12.5 19.5"/></svg>
-        </button>
         <div class="right-controls">
           <button class="icon-btn" id="pipBtn" title="Picture in picture">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="14" rx="1.5"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor" stroke="none"/></svg>
@@ -3140,11 +3165,18 @@
     // prev/next, recall) to lazily stand up the audio enhancement graph
     // — see buildAudioFxGraph below — rather than requiring an extra,
     // separate tap on that button first when it's already on by default.
-    // Harmless when this call ISN'T a real gesture (auto-select on
-    // desktop, an internal retry): AudioContext creation itself doesn't
-    // need one, only resuming a suspended one does, and that's retried
-    // from the button's own click handler and other real interactions.
-    if(audioFxEnabled) buildAudioFxGraph();
+    // Also resumes it here if needed — a freshly-created AudioContext
+    // starts 'suspended' in most desktop browsers until explicitly
+    // resumed, even from within a genuine user-gesture call stack; this
+    // was a real bug (audio enhancement being on by default meant the
+    // graph got built here but never actually resumed, so the whole
+    // audio path stayed silent — output volume genuinely at zero, not
+    // just "sounds different" — until the settings panel happened to be
+    // opened and the toggle re-clicked, which DID call resume()).
+    if(audioFxEnabled){
+      const graph = buildAudioFxGraph();
+      if(graph && graph.ctx.state === 'suspended') graph.ctx.resume();
+    }
     // A genuinely NEW channel selection (as opposed to an internal retry
     // replaying this same channel — a route hop, the stall watchdog, or
     // handleRouteExhaustion's own delayed retry below) resets the
@@ -3585,6 +3617,22 @@
     if(graph && graph.ctx.state === 'suspended') graph.ctx.resume();
     applyAudioFxState();
   });
+  // Defensive backstop beyond the two explicit resume() calls above —
+  // autoplay/audio-gesture policy is notoriously inconsistent across
+  // browsers, and a suspended AudioContext means total silence (not
+  // degraded audio, actual zero output), so this is cheap insurance:
+  // any real click or touch anywhere on the page also tries to resume
+  // it, self-removing once it's actually running so it's not doing
+  // pointless work for the rest of the session.
+  function resumeAudioFxOnInteraction(){
+    if(audioFxGraph && audioFxGraph.ctx.state === 'suspended') audioFxGraph.ctx.resume();
+    if(!audioFxGraph || audioFxGraph.ctx.state === 'running'){
+      document.removeEventListener('click', resumeAudioFxOnInteraction);
+      document.removeEventListener('touchend', resumeAudioFxOnInteraction);
+    }
+  }
+  document.addEventListener('click', resumeAudioFxOnInteraction);
+  document.addEventListener('touchend', resumeAudioFxOnInteraction);
 
   // ---------- Settings panel (open/close) ----------
   // Everything that used to be scattered across separate icon+popover
@@ -3892,13 +3940,19 @@
     refreshFilters();
   });
 
-  // ---------- TV Guide: optional, toggle between guide content and a
-  // plain channel logo within the same fixed-size box — the sidebar's own
-  // width/position never changes, only what's shown inside guide-or-logo. ----------
+  // ---------- TV Guide: the whole guide-or-logo block only exists at all
+  // when the toggle is on — off means genuinely hidden (display:none),
+  // freeing that space entirely, not swapped for a logo placeholder. ----------
   function updateGuideVisibility(){
     const showGuide = guideToggle.checked;
+    guideOrLogo.style.display = showGuide ? '' : 'none';
     guideInner.style.display = showGuide ? 'flex' : 'none';
-    logoDisplay.style.display = showGuide ? 'none' : 'flex';
+    // logoDisplay no longer has a reachable use as a toggled fallback —
+    // the whole block hides now instead of falling back to it — but it
+    // still defaults to display:flex in CSS, so it has to stay
+    // explicitly hidden here or it'd render stacked behind guideInner
+    // whenever the guide itself is showing.
+    logoDisplay.style.display = 'none';
   }
   guideToggle.addEventListener('change', ()=>{
     updateGuideVisibility();
