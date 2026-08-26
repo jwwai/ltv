@@ -211,11 +211,6 @@
   .source-btn{width:26px;height:26px;opacity:.6;}
   .source-btn svg{width:15px;height:15px;}
   .source-btn:hover, .source-btn.is-open{opacity:1;background:rgba(255,255,255,.1);}
-  .now-playing{
-    font-family:'Inter',sans-serif;font-weight:500;font-size:14px;
-    color:var(--text-faint);letter-spacing:0;margin-left:2px;
-  }
-  .now-playing:not(:empty)::before{content:'·';margin-right:10px;opacity:.5;}
   .source-panel{
     position:absolute;top:calc(100% + 8px);left:0;z-index:20;
     background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);
@@ -875,7 +870,6 @@
       <button class="icon-btn source-btn" id="sourceBtn" title="Change channel source">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
       </button>
-      <span class="now-playing" id="nowPlayingLabel"></span>
     </div>
     <div class="meta" id="metaLine"><b>Loading playlist…</b></div>
     <div class="source-panel" id="sourcePanel" style="display:none;">
@@ -1212,7 +1206,6 @@
   const qualityPanel = el('qualityPanel');
   const routeBtn = el('routeBtn');
   const routePanel = el('routePanel');
-  const nowPlayingLabel = el('nowPlayingLabel');
   const sourceBtn = el('sourceBtn');
   const sourcePanel = el('sourcePanel');
   const sourcePreset = el('sourcePreset');
@@ -1724,16 +1717,36 @@
   // set of countries most people actually want. Category/Language stay
   // plain alphabetical (via uniqueSorted) — there's no single obviously
   // "most wanted" ordering for those the way there is for country.
-  // India, US, Australia, then the UK — both 'UK' and 'GB' are listed
-  // since different playlist sources tag British channels differently
-  // (iptv-org's own tvg-id convention uses ".uk", but ISO 3166-1's
-  // official code is "GB" — whichever one actually shows up in a given
-  // channel's data gets prioritized; having both here is harmless since
-  // only the one with real matching channels ever renders as a chip).
-  const COUNTRY_PRIORITY_ORDER = ['IN','US','AU','UK','GB'];
+  //
+  // Matched case-insensitively against BOTH a 2-letter ISO code ("IN")
+  // AND the full country name ("India") — this is the actual fix for a
+  // real bug: different playlist sources tag country completely
+  // differently. iptv-org's own convention is 2-letter codes, but the
+  // default source (romaxa55/world_ip_tv) tags tvg-country with the full
+  // name directly ("Afghanistan", "Albania", ...) — matching only 'IN'/
+  // 'US'/'AU'/'UK'/'GB' against that data meant the priority list never
+  // matched anything at all, silently falling through to pure
+  // alphabetical every time, which is exactly the bug being reported.
+  const COUNTRY_PRIORITY_ORDER = [
+    'IN','India',
+    'US','USA','United States',
+    'AU','Australia',
+    'UK','United Kingdom','GB'
+  ];
   function orderCountryOptions(named){
-    const priority = COUNTRY_PRIORITY_ORDER.filter(cc => named.includes(cc));
-    const rest = named.filter(cc => !COUNTRY_PRIORITY_ORDER.includes(cc)).sort((a,b)=>a.localeCompare(b));
+    // Walk the priority list in order, and for each entry find the first
+    // ACTUAL value in `named` that matches it case-insensitively — that
+    // way whichever convention (code or full name) the current source
+    // actually uses, the real matching value gets pulled to the front,
+    // in the requested sequence, without duplicating an entry that
+    // happens to match more than one priority alias.
+    const priority = [];
+    const claimed = new Set();
+    COUNTRY_PRIORITY_ORDER.forEach(p=>{
+      const match = named.find(v => !claimed.has(v) && String(v).toLowerCase() === p.toLowerCase());
+      if(match){ priority.push(match); claimed.add(match); }
+    });
+    const rest = named.filter(v => !claimed.has(v)).sort((a,b)=>String(a).localeCompare(String(b)));
     return [...priority, ...rest];
   }
   // Friendly display names for country codes ("IN" -> "India") using the
@@ -2220,21 +2233,22 @@
       activeBubbleEl = null;
     }
     // Looked up from allChannels (never filtered) rather than
-    // filtered[activeIndex] — the label should always reflect what's
+    // filtered[activeIndex] — the bar should always reflect what's
     // actually playing, even if the current filters happen to hide that
     // channel from the visible rail right now.
     const playing = activePlayingChannelId != null
       ? allChannels.find(c => c.id === activePlayingChannelId)
       : null;
-    nowPlayingLabel.textContent = playing ? playing.name : '';
     updateNowPlayingBar(playing);
   }
 
   // The dedicated "Logo | Now playing Channel Name" bar above the search
-  // field — separate from nowPlayingLabel (the small text next to the
-  // "Live TV" title), which stays as-is for the header. Also the one
-  // place the favorite heart lives now (moved off individual channel
-  // tiles) — favorites what's actually playing right now.
+  // field — this is now the only place that shows what's playing;
+  // there used to also be a small text label next to the "Live TV"
+  // title in the header, removed since this bar already covers it.
+  // Also the one place the favorite heart lives now (moved off
+  // individual channel tiles) — favorites what's actually playing right
+  // now.
   let npFavHeartChannel = null;
   function updateNowPlayingBar(ch){
     npNameBar.textContent = ch ? ch.name : 'Now playing Channel Name';
@@ -3664,9 +3678,15 @@
       });
     }
 
-    // scroll active bubble into view
-    const activeBubble = rail.querySelector(`.bubble[data-idx="${idx}"]`);
-    if(activeBubble) activeBubble.scrollIntoView({behavior:'smooth', inline:'center', block:'nearest'});
+    // No auto-scroll-into-view here anymore — this was written for the
+    // old horizontal-scrolling rail (centering the selected bubble in
+    // that strip). In the grid layout it was actually causing the
+    // channel grid to jump/scroll to wherever the selected tile happened
+    // to be, which read as "the list moves to the middle" — the grid
+    // now stays exactly where it is (channel 1 visible at the top,
+    // unless the person has deliberately scrolled) when picking a
+    // channel, same as any other click shouldn't reposition the page
+    // under you.
   }
 
   el('prevBtn').addEventListener('click', ()=>{
