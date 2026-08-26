@@ -267,6 +267,13 @@
   }
   video{width:100%;height:100%;object-fit:contain;background:#000;display:block;}
 
+  .cast-overlay-btn{
+    position:absolute;top:10px;right:10px;z-index:15;
+    background:rgba(10,12,16,.55);backdrop-filter:blur(6px);
+    border-radius:8px;
+  }
+  .cast-overlay-btn:hover{background:rgba(10,12,16,.8);}
+
   .player-empty{
     position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
     gap:10px;color:var(--text-faint);text-align:center;padding:20px;
@@ -334,6 +341,75 @@
   .quality-option:hover{background:rgba(255,255,255,.08);}
   .quality-option.is-selected{color:var(--accent);}
   .quality-option.is-selected::after{content:'✓';font-size:11px;flex:none;}
+
+  /* ---------- Consolidated settings panel ---------- */
+  .settings-wrap{position:relative;}
+  .settings-panel{
+    position:absolute;bottom:calc(100% + 8px);right:0;z-index:25;
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;
+    padding:12px;box-shadow:var(--card-shadow);width:250px;max-height:min(70vh,560px);
+    overflow-y:auto;display:flex;flex-direction:column;gap:10px;
+  }
+  .settings-row-item{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .settings-row-label{
+    font-size:12.5px;font-weight:600;color:var(--text);display:flex;flex-direction:column;gap:2px;
+  }
+  .settings-row-sub{font-size:10.5px;font-weight:500;color:var(--text-faint);}
+  .settings-divider{height:1px;background:var(--border);margin:2px 0;flex:none;}
+
+  .settings-switch{position:relative;width:36px;height:20px;flex:none;cursor:pointer;}
+  .settings-switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;}
+  .switch-track{
+    position:absolute;inset:0;background:rgba(255,255,255,.18);border-radius:999px;
+    transition:background .15s;
+  }
+  .switch-track::after{
+    content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+    background:#fff;transition:transform .15s;
+  }
+  .settings-switch input:checked + .switch-track{background:var(--accent);}
+  .settings-switch input:checked + .switch-track::after{transform:translateX(16px);}
+
+  .preset-row{display:flex;gap:6px;}
+  .preset-btn{
+    flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border);color:var(--text);
+    font:inherit;font-size:11px;font-weight:600;padding:6px 4px;border-radius:7px;cursor:pointer;
+    text-align:center;
+  }
+  .preset-btn:hover{background:rgba(255,255,255,.1);}
+  .preset-btn.is-selected{background:var(--accent-soft);border-color:var(--accent-dim);color:var(--accent);}
+
+  .settings-slider{
+    -webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:3px;
+    background:rgba(255,255,255,.28);cursor:pointer;margin:2px 0 4px;
+  }
+  .settings-slider::-webkit-slider-thumb{
+    -webkit-appearance:none;appearance:none;width:13px;height:13px;border-radius:50%;
+    background:var(--accent);cursor:pointer;border:2px solid #0a0c10;
+  }
+  .settings-slider::-moz-range-thumb{
+    width:13px;height:13px;border-radius:50%;background:var(--accent);cursor:pointer;
+    border:2px solid #0a0c10;
+  }
+
+  .settings-subbtn{
+    background:none;border:none;color:var(--text);font:inherit;font-size:12.5px;font-weight:600;
+    padding:4px 2px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;
+    width:100%;text-align:left;
+  }
+  .settings-subbtn:hover{color:var(--accent);}
+  .settings-subbtn-caret{font-size:10px;color:var(--text-faint);transition:transform .15s;}
+  .settings-subbtn.is-open .settings-subbtn-caret{transform:rotate(180deg);}
+  .settings-nested-panel{
+    position:static!important;background:rgba(255,255,255,.04);border:none;box-shadow:none;
+    min-width:0;width:100%;box-sizing:border-box;margin-top:2px;
+  }
+  .settings-action-btn{
+    background:rgba(255,255,255,.06);border:1px solid var(--border);color:var(--text);
+    font:inherit;font-size:12.5px;font-weight:600;padding:9px;border-radius:8px;cursor:pointer;
+    width:100%;text-align:center;
+  }
+  .settings-action-btn:hover{background:rgba(255,255,255,.1);}
 
   .vol-group{display:flex;align-items:center;gap:8px;}
   .vol-slider{
@@ -586,6 +662,17 @@
     .field select, .field input, .source-panel select, .source-panel input{
       font-size:16px;
     }
+    /* Keeps the player in view while scrolling through the channel
+       list/guide/filters below it, instead of it scrolling away entirely
+       — sticks to the very top of the viewport once scrolled past the
+       header above it. Pure CSS (position:sticky), no JS/scroll-listener
+       needed. Desktop/tablet layouts keep the player in a fixed spot
+       within the grid already, so this is mobile-only. */
+    .player-frame{
+      position:sticky;top:0;z-index:30;
+      background:var(--bg);
+      box-shadow:0 6px 16px rgba(0,0,0,.45);
+    }
   }
 </style>
 </head>
@@ -618,6 +705,10 @@
     <div class="player-frame" id="playerFrame">
       <video id="video" playsinline muted></video>
 
+      <button class="icon-btn cast-overlay-btn" id="castBtn" title="Cast to a nearby device">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V5a1 1 0 011-1h18a1 1 0 011 1v14a1 1 0 01-1 1h-7"/><path d="M2 13a9 9 0 018 8"/><path d="M2 17a5 5 0 014 4"/><circle cx="3" cy="21" r="1" fill="currentColor" stroke="none"/></svg>
+      </button>
+
       <div class="player-empty" id="emptyState">
         <div class="glyph">
           <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><path d="M8 5v14l11-7-11-7z" fill="currentColor"/></svg>
@@ -635,9 +726,6 @@
           </button>
           <input class="vol-slider" id="volSlider" type="range" min="0" max="1" step="0.01" value="1">
         </div>
-        <button class="icon-btn" id="audioFxBtn" title="Enhanced audio (bass, presence, stereo width)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0118 0"/><path d="M3 12a9 9 0 009 9"/><path d="M12 3a9 9 0 019 9"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/></svg>
-        </button>
 
         <button class="icon-btn round-btn" id="prevBtn" title="Previous channel">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM19 5v14l-9-7 9-7z"/></svg>
@@ -649,21 +737,47 @@
 
         <div class="spacer"></div>
 
-        <div class="quality-wrap">
-          <button class="icon-btn" id="qualityBtn" title="Video quality" style="display:none;">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 18h4M4 12h8M4 6h16"/></svg>
+        <div class="settings-wrap">
+          <button class="icon-btn" id="settingsBtn" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
           </button>
-          <div class="quality-panel" id="qualityPanel" style="display:none;"></div>
+          <div class="settings-panel" id="settingsPanel" style="display:none;">
+            <div class="settings-row-item">
+              <span class="settings-row-label">Enhanced audio <span class="settings-row-sub">bass, presence, stereo width</span></span>
+              <label class="settings-switch"><input type="checkbox" id="audioFxToggle"><span class="switch-track"></span></label>
+            </div>
+            <div class="settings-row-item" id="subtitleRow" style="display:none;">
+              <span class="settings-row-label">Subtitles</span>
+              <label class="settings-switch"><input type="checkbox" id="subtitleToggle"><span class="switch-track"></span></label>
+            </div>
+
+            <div class="settings-divider"></div>
+            <div class="settings-row-label">Picture quality</div>
+            <div class="preset-row" id="pictureModeRow">
+              <button type="button" class="preset-btn is-selected" data-mode="standard">Standard</button>
+              <button type="button" class="preset-btn" data-mode="dynamic">Dynamic</button>
+              <button type="button" class="preset-btn" data-mode="movie">Movie</button>
+            </div>
+            <div class="settings-row-label">Brightness <span class="settings-row-sub" id="brightnessValue">100%</span></div>
+            <input type="range" class="settings-slider" id="brightnessSlider" min="50" max="150" step="1" value="100">
+            <div class="settings-row-label">Contrast <span class="settings-row-sub" id="contrastValue">100%</span></div>
+            <input type="range" class="settings-slider" id="contrastSlider" min="50" max="150" step="1" value="100">
+
+            <div class="settings-divider"></div>
+            <button type="button" class="settings-subbtn" id="qualityBtn" title="Video quality" style="display:none;">
+              <span>Video quality</span><span class="settings-subbtn-caret">▾</span>
+            </button>
+            <div class="quality-panel settings-nested-panel" id="qualityPanel" style="display:none;"></div>
+
+            <button type="button" class="settings-subbtn" id="routeBtn" title="Streaming route">
+              <span>Streaming route</span><span class="settings-subbtn-caret">▾</span>
+            </button>
+            <div class="quality-panel settings-nested-panel" id="routePanel" style="display:none;"></div>
+
+            <div class="settings-divider"></div>
+            <button type="button" class="settings-action-btn" id="copyLinkBtn">Copy stream link</button>
+          </div>
         </div>
-        <div class="quality-wrap">
-          <button class="icon-btn" id="routeBtn" title="Streaming route">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="12" r="2.2"/><path d="M6 8.2v7.6M6 12h6a4 4 0 004-4"/></svg>
-          </button>
-          <div class="quality-panel" id="routePanel" style="display:none;"></div>
-        </div>
-        <button class="icon-btn" id="castBtn" title="Cast to a nearby device">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V5a1 1 0 011-1h18a1 1 0 011 1v14a1 1 0 01-1 1h-7"/><path d="M2 13a9 9 0 018 8"/><path d="M2 17a5 5 0 014 4"/><circle cx="3" cy="21" r="1" fill="currentColor" stroke="none"/></svg>
-        </button>
         <button class="icon-btn" id="vlcBtn" title="Copy the stream link to paste into VLC" style="display:none;">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V4a2 2 0 012-2h10"/></svg>
         </button>
@@ -773,6 +887,7 @@
   // Used only if Sourcelist.csv hasn't been uploaded yet / fails to load —
   // keeps the app functional rather than stuck with an empty picker.
   const SOURCE_LIST_FALLBACK = [
+    {name: 'World IPTV', url: 'https://romaxa55.github.io/world_ip_tv/output/index.m3u'},
     {name: 'Iptv', url: 'https://iptv-org.github.io/iptv/index.m3u'}
   ];
   const SOURCE_STORAGE_KEY = 'livetv_source_v2';
@@ -861,7 +976,17 @@
   const toastEl = el('toast');
   const volSlider = el('volSlider');
   const muteBtn = el('muteBtn');
-  const audioFxBtn = el('audioFxBtn');
+  const audioFxToggle = el('audioFxToggle');
+  const settingsBtn = el('settingsBtn');
+  const settingsPanel = el('settingsPanel');
+  const subtitleRow = el('subtitleRow');
+  const subtitleToggle = el('subtitleToggle');
+  const pictureModeRow = el('pictureModeRow');
+  const brightnessSlider = el('brightnessSlider');
+  const contrastSlider = el('contrastSlider');
+  const brightnessValue = el('brightnessValue');
+  const contrastValue = el('contrastValue');
+  const copyLinkBtn = el('copyLinkBtn');
   const volIcon = el('volIcon');
   const guidePanel = el('guidePanel');
   const guideClock = el('guideClock');
@@ -1097,13 +1222,25 @@
   // their programme maps and name indexes together.
   const GUIDE_CACHE_MAX = 8; // parsed XMLTV data per country can be a few MB each — bounding this matters on memory-constrained mobile
   async function loadGuideForCountry(cc){
-    if(guideCache.has(cc)) return guideCache.get(cc);
+    // cc can be null (see showGuideFor below) — 'GLOBAL' is a distinct
+    // cache key for that country-agnostic fallback path, kept separate
+    // from any real 2-letter country code.
+    const cacheKey = cc || 'GLOBAL';
+    if(guideCache.has(cacheKey)) return guideCache.get(cacheKey);
     if(guideCache.size >= GUIDE_CACHE_MAX){
       const oldest = guideCache.keys().next().value; // Map preserves insertion order — first key is the least-recently-added
       guideCache.delete(oldest);
     }
     const promise = (async ()=>{
-      const sources = sourcesForCountry(cc);
+      // With no resolvable country at all, the only thing left worth
+      // trying is the global multi-country file, matched by exact name
+      // only (never fuzzy — a fuzzy match against a country-blind pool
+      // has no way to tell a same-ish-named channel from an unrelated
+      // country apart). This used to never even get attempted: any
+      // channel whose source doesn't tag country the way iptv-org's own
+      // list does — LG Channels-branded IDs, several custom/CSV sources —
+      // got refused a guide outright before a single fetch happened.
+      const sources = cc ? sourcesForCountry(cc) : [{name:'epg.pw (global)', url:'https://epg.pw/xmltv/epg_lite.xml.gz', scoped:false}];
       const results = await Promise.all(sources.map(s => fetchXmltvMap(s.url)));
       const merged = new Map();
       const mergedNames = new Map();      // all sources — exact lookups only
@@ -1120,7 +1257,7 @@
       });
       return merged.size ? {map: merged, nameIndex: mergedNames, fuzzyNameIndex: fuzzyNames, sources: usedSources} : null;
     })();
-    guideCache.set(cc, promise);
+    guideCache.set(cacheKey, promise);
     return promise;
   }
 
@@ -1221,12 +1358,17 @@
     guideSourceNote.textContent = '';
 
     const cc = countryCodeFor(ch);
-    if(!cc){ renderGuideUnavailable("Couldn't determine a guide source for this channel."); return; }
-
+    // No early return when cc is null anymore — loadGuideForCountry(null)
+    // still tries an exact-name match against the global guide file
+    // rather than refusing to even look. That global attempt is real
+    // network cost cc-unknown channels didn't used to pay, but it's the
+    // only source ever available to them, so it's worth it.
     const result = await loadGuideForCountry(cc);
     if(guideChannel !== ch) return; // channel changed while we were fetching
     if(!result){
-      renderGuideUnavailable('Guide sources are unreachable right now (network or CORS restriction) — try again shortly.');
+      renderGuideUnavailable(cc
+        ? 'Guide sources are unreachable right now (network or CORS restriction) — try again shortly.'
+        : "Couldn't determine a guide source for this channel, and no exact match was found in the global guide either.");
       return;
     }
 
@@ -1356,8 +1498,33 @@
     return actual === filterValue;
   }
   function optionsWithUnspecified(channels, field){
-    const named = uniqueSorted(channels.map(c=>c[field]));
+    let named = uniqueSorted(channels.map(c=>c[field]));
+    if(field === 'country') named = orderCountryOptions(named);
     return channels.some(c=>!c[field]) ? [...named, UNSPECIFIED_FILTER_VALUE] : named;
+  }
+
+  // ---------- Country priority order ----------
+  // The Country filter benefits from a curated order rather than flat
+  // alphabetical — a home country and a handful of major ones surfaced
+  // first, instead of making everyone hunt alphabetically for the small
+  // set of countries most people actually want. Category/Language stay
+  // plain alphabetical (via uniqueSorted) — there's no single obviously
+  // "most wanted" ordering for those the way there is for country.
+  const COUNTRY_PRIORITY_ORDER = ['IN','US','DE','CN','FR','CA'];
+  function orderCountryOptions(named){
+    const priority = COUNTRY_PRIORITY_ORDER.filter(cc => named.includes(cc));
+    const rest = named.filter(cc => !COUNTRY_PRIORITY_ORDER.includes(cc)).sort((a,b)=>a.localeCompare(b));
+    return [...priority, ...rest];
+  }
+  // Friendly display names for country codes ("IN" -> "India") using the
+  // browser's own built-in locale data — no separate lookup table to
+  // maintain or keep in sync with whatever codes actually show up across
+  // different playlist sources.
+  let regionDisplayNames = null;
+  try{ regionDisplayNames = new Intl.DisplayNames(['en'], {type:'region'}); }catch(e){ /* unsupported — falls back to the raw code below */ }
+  function countryDisplayName(code){
+    if(!regionDisplayNames) return code;
+    try{ return regionDisplayNames.of(code) || code; }catch(e){ return code; }
   }
 
   // Builds tvgId -> group-title (and name -> group-title as a fallback) maps
@@ -1444,10 +1611,13 @@
     optAll.value = '';
     optAll.textContent = placeholder;
     selectEl.appendChild(optAll);
+    const isCountrySelect = selectEl === countrySel;
     values.forEach(v=>{
       const o = document.createElement('option');
       o.value = v;
-      o.textContent = v === UNSPECIFIED_FILTER_VALUE ? UNSPECIFIED_LABEL : v;
+      o.textContent = v === UNSPECIFIED_FILTER_VALUE
+        ? UNSPECIFIED_LABEL
+        : (isCountrySelect ? countryDisplayName(v) : v);
       selectEl.appendChild(o);
     });
     if(selectedValue && values.includes(selectedValue)) selectEl.value = selectedValue;
@@ -2354,8 +2524,7 @@
   // Copying the raw stream URL sidesteps that entirely: paste it straight
   // into VLC's own "Open Network Stream" dialog (Ctrl+N) — no file
   // download, no file-association step, works identically on every OS.
-  async function copyVlcStreamUrl(ch){
-    const text = ch.url;
+  async function copyToClipboard(text, successMsg){
     try{
       await navigator.clipboard.writeText(text);
     }catch(e){
@@ -2377,7 +2546,10 @@
         return;
       }
     }
-    showToast(`Copied — paste into VLC's "Open Network Stream" (Ctrl+N).`);
+    showToast(successMsg);
+  }
+  function copyVlcStreamUrl(ch){
+    return copyToClipboard(ch.url, `Copied — paste into VLC's "Open Network Stream" (Ctrl+N).`);
   }
 
   // ---------- Manual resolve for redirect-style blocks (jmp2.uk etc) ----------
@@ -2494,6 +2666,12 @@
     qualityBtn.classList.remove('is-open');
     qualityPanel.style.display = 'none';
     qualityPanel.innerHTML = '';
+    // Reset subtitle availability too — a new channel/route's tracks
+    // aren't known again until its manifest actually parses (or, for
+    // native HLS, until loadedmetadata fires — see startDirectPlayback).
+    subtitleRow.style.display = 'none';
+    subtitlesOn = false;
+    subtitleToggle.checked = false;
   }
 
   function renderQualityOptions(hlsInstance){
@@ -2725,6 +2903,23 @@
       if(token !== playbackToken) return;
       setupQualityMenu(hls);
       checkVideoCodecSupport(ch, hls);
+      updateSubtitleAvailability();
+      applySubtitleState();
+      // Caps the AUTO level to 720p or below on first load — only ever
+      // affects Auto (ABR) selection; the person can still explicitly
+      // pick 1080p/higher from the quality menu, which overrides this
+      // cap the same way any manual selection does. Prevents an initial
+      // guess at the highest available rendition (which capLevelToPlayerSize
+      // doesn't fully prevent — a full-width player can still be wide
+      // enough to justify 1080p/4K by that logic alone) from being the
+      // very first thing a slow connection has to fight through.
+      if(hls.currentLevel === -1){
+        let capIdx = -1, capHeight = 0;
+        hls.levels.forEach((lvl, i)=>{
+          if(lvl.height && lvl.height <= 720 && lvl.height > capHeight){ capHeight = lvl.height; capIdx = i; }
+        });
+        if(capIdx !== -1) hls.autoLevelCapping = capIdx;
+      }
     });
     hls.on(Hls.Events.LEVEL_SWITCHED, ()=>{
       if(token !== playbackToken || qualityPanel.style.display === 'none') return;
@@ -2910,6 +3105,8 @@
     pendingLoadedMetadataHandler = ()=>{
       pendingLoadedMetadataHandler = null;
       video.play().catch(()=>{});
+      updateSubtitleAvailability();
+      applySubtitleState();
     };
     video.addEventListener('loadedmetadata', pendingLoadedMetadataHandler, {once:true});
   }
@@ -3378,17 +3575,142 @@
     wetGain.gain.cancelScheduledValues(now);
     dryGain.gain.linearRampToValueAtTime(audioFxEnabled ? 0 : 1, now + 0.08);
     wetGain.gain.linearRampToValueAtTime(audioFxEnabled ? 1 : 0, now + 0.08);
-    audioFxBtn.title = audioFxEnabled ? 'Enhanced audio on (bass, presence, stereo width)' : 'Enhanced audio off';
   }
 
-  audioFxBtn.classList.toggle('is-active', audioFxEnabled); // reflect the stored preference immediately, even before the graph exists
-  audioFxBtn.addEventListener('click', ()=>{
-    audioFxEnabled = !audioFxEnabled;
+  audioFxToggle.checked = audioFxEnabled; // reflect the stored preference immediately, even before the graph exists
+  audioFxToggle.addEventListener('change', ()=>{
+    audioFxEnabled = audioFxToggle.checked;
     localStorage.setItem(AUDIO_FX_STORAGE_KEY, audioFxEnabled ? 'on' : 'off');
-    audioFxBtn.classList.toggle('is-active', audioFxEnabled);
     const graph = buildAudioFxGraph();
     if(graph && graph.ctx.state === 'suspended') graph.ctx.resume();
     applyAudioFxState();
+  });
+
+  // ---------- Settings panel (open/close) ----------
+  // Everything that used to be scattered across separate icon+popover
+  // pairs (quality, route, audio enhance) now lives inside one panel
+  // under a single gear icon — qualityBtn/routePanel etc. keep their own
+  // existing internal open/close logic exactly as before (they're
+  // rendered as nested accordion rows within this panel now, not
+  // separate floating popovers), this just handles the outer container.
+  settingsBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const opening = settingsPanel.style.display === 'none' || !settingsPanel.style.display;
+    settingsPanel.style.display = opening ? 'flex' : 'none';
+    settingsBtn.classList.toggle('is-open', opening);
+    if(!opening){
+      // Collapse any nested quality/route accordion rows too, so
+      // reopening the panel later starts from a clean, collapsed state
+      // instead of remembering whatever sub-panel happened to be open.
+      qualityPanel.style.display = 'none';
+      qualityBtn.classList.remove('is-open');
+      routePanel.style.display = 'none';
+      routeBtn.classList.remove('is-open');
+    }
+  });
+  document.addEventListener('click', (e)=>{
+    if(settingsPanel.style.display !== 'none' && !settingsPanel.contains(e.target) && e.target !== settingsBtn){
+      settingsPanel.style.display = 'none';
+      settingsBtn.classList.remove('is-open');
+    }
+  });
+
+  // ---------- Picture adjustments (brightness / contrast / picture mode) ----------
+  // Applied as a CSS filter directly on the <video> element — a purely
+  // visual transform of the rendered frame, so it works identically
+  // regardless of which backend actually decoded it (hls.js/MSE, native
+  // HLS, mpegts.js) and needs zero coordination with any of them.
+  const PICTURE_MODE_STORAGE_KEY = 'livetv_picturemode_v1';
+  const BRIGHTNESS_STORAGE_KEY = 'livetv_brightness_v1';
+  const CONTRAST_STORAGE_KEY = 'livetv_contrast_v1';
+  // Standard = neutral passthrough. Dynamic = punchier/more saturated,
+  // like a "vivid" TV picture mode. Movie = very slightly desaturated
+  // and softened, closer to how a lot of broadcast/streaming content is
+  // actually graded — these are multipliers on top of whatever the
+  // brightness/contrast sliders are set to, not a replacement for them.
+  const PICTURE_MODES = {
+    standard: {saturate: 1,    contrast: 1,    brightness: 1},
+    dynamic:  {saturate: 1.25, contrast: 1.12, brightness: 1.02},
+    movie:    {saturate: 0.9,  contrast: 0.95, brightness: 0.98}
+  };
+  let pictureMode = localStorage.getItem(PICTURE_MODE_STORAGE_KEY) || 'standard';
+  if(!PICTURE_MODES[pictureMode]) pictureMode = 'standard';
+  try{
+    const savedBrightness = localStorage.getItem(BRIGHTNESS_STORAGE_KEY);
+    const savedContrast = localStorage.getItem(CONTRAST_STORAGE_KEY);
+    if(savedBrightness) brightnessSlider.value = savedBrightness;
+    if(savedContrast) contrastSlider.value = savedContrast;
+  }catch(e){ /* storage unavailable — sliders just stay at their default 100 */ }
+
+  function applyVideoFilters(){
+    const userBrightness = Number(brightnessSlider.value) / 100;
+    const userContrast = Number(contrastSlider.value) / 100;
+    const mode = PICTURE_MODES[pictureMode] || PICTURE_MODES.standard;
+    video.style.filter = `brightness(${(userBrightness * mode.brightness).toFixed(3)}) contrast(${(userContrast * mode.contrast).toFixed(3)}) saturate(${mode.saturate})`;
+    brightnessValue.textContent = `${brightnessSlider.value}%`;
+    contrastValue.textContent = `${contrastSlider.value}%`;
+  }
+
+  pictureModeRow.querySelectorAll('.preset-btn').forEach(btn=>{
+    btn.classList.toggle('is-selected', btn.dataset.mode === pictureMode);
+    btn.addEventListener('click', ()=>{
+      pictureMode = btn.dataset.mode;
+      try{ localStorage.setItem(PICTURE_MODE_STORAGE_KEY, pictureMode); }catch(e){}
+      pictureModeRow.querySelectorAll('.preset-btn').forEach(b => b.classList.toggle('is-selected', b === btn));
+      applyVideoFilters();
+    });
+  });
+  brightnessSlider.addEventListener('input', ()=>{
+    applyVideoFilters();
+    try{ localStorage.setItem(BRIGHTNESS_STORAGE_KEY, brightnessSlider.value); }catch(e){}
+  });
+  contrastSlider.addEventListener('input', ()=>{
+    applyVideoFilters();
+    try{ localStorage.setItem(CONTRAST_STORAGE_KEY, contrastSlider.value); }catch(e){}
+  });
+  applyVideoFilters();
+
+  // ---------- Copy stream link (settings panel) ----------
+  copyLinkBtn.addEventListener('click', async ()=>{
+    if(activeIndex < 0 || !filtered[activeIndex]){
+      showToast('Pick a channel first, then copy its link.');
+      return;
+    }
+    await copyToClipboard(filtered[activeIndex].url, 'Stream link copied to clipboard.');
+    settingsPanel.style.display = 'none';
+    settingsBtn.classList.remove('is-open');
+  });
+
+  // ---------- Subtitles ----------
+  // hls.js and native HLS both expose track lists, but through different
+  // APIs (hls.subtitleTracks/subtitleTrack vs the standard
+  // video.textTracks) — this covers both so the toggle behaves the same
+  // regardless of which backend is actually playing. Row only shown once
+  // a channel's manifest/tracks are actually known to include a
+  // subtitle/caption track — most IPTV streams don't have one at all, so
+  // showing a toggle that would just do nothing isn't useful.
+  let subtitlesOn = false;
+  function updateSubtitleAvailability(){
+    let hasTracks = false;
+    if(hls && hls.subtitleTracks) hasTracks = hls.subtitleTracks.length > 0;
+    else if(video.textTracks) hasTracks = Array.from(video.textTracks).some(t => t.kind === 'subtitles' || t.kind === 'captions');
+    subtitleRow.style.display = hasTracks ? '' : 'none';
+    if(!hasTracks){ subtitlesOn = false; subtitleToggle.checked = false; }
+  }
+  function applySubtitleState(){
+    if(hls && hls.subtitleTracks && hls.subtitleTracks.length){
+      hls.subtitleDisplay = subtitlesOn;
+      if(subtitlesOn && hls.subtitleTrack === -1) hls.subtitleTrack = 0;
+    }
+    if(video.textTracks){
+      Array.from(video.textTracks).forEach(t=>{
+        if(t.kind === 'subtitles' || t.kind === 'captions') t.mode = subtitlesOn ? 'showing' : 'hidden';
+      });
+    }
+  }
+  subtitleToggle.addEventListener('change', ()=>{
+    subtitlesOn = subtitleToggle.checked;
+    applySubtitleState();
   });
 
   // ---------- Cast to a nearby device ----------
@@ -3711,11 +4033,10 @@
     sourceCustomUrl.style.display = sourcePreset.value === 'custom' ? '' : 'none';
   });
 
-  // A source counts as the default/"iptv" kind (curated order, no forced
-  // sort — see applyFilters) only when it's literally iptv-org's own
-  // index.m3u — matched by URL, not name, so a CSV row can be renamed
-  // freely without silently losing this behavior.
-  const DEFAULT_SOURCE_URL = 'https://iptv-org.github.io/iptv/index.m3u';
+  // Which row loads by default when nothing's been saved yet (see
+  // loadSavedSourceOrDefault below) — matched by URL, not name, so a CSV
+  // row can be renamed freely without silently losing this behavior.
+  const DEFAULT_SOURCE_URL = 'https://romaxa55.github.io/world_ip_tv/output/index.m3u';
 
   function currentSourceLabel(saved){
     return saved.type === 'custom' ? saved.url : saved.name;
