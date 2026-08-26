@@ -262,8 +262,8 @@
     transition:box-shadow .4s ease, border-color .4s ease;
   }
   .player-frame.is-live{
-    border-color:var(--accent-dim);
-    box-shadow:0 30px 60px -25px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02) inset, 0 0 0 1px var(--accent-soft), 0 0 34px -12px rgba(52,211,153,.28);
+    border-color:var(--accent);border-width:2px;
+    box-shadow:0 30px 60px -25px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02) inset, 0 0 0 2px var(--accent-soft), 0 0 40px -10px rgba(52,211,153,.45);
   }
   video{width:100%;height:100%;object-fit:contain;background:#000;display:block;}
 
@@ -508,6 +508,38 @@
     font-variant-numeric:tabular-nums;
   }
   .bubble.active .chnum{border-color:var(--accent);color:var(--accent);}
+  .fav-heart{
+    position:absolute;bottom:-1px;left:-1px;z-index:2;width:18px;height:18px;
+    border-radius:50%;background:var(--bg-elevated);border:2px solid var(--bg);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+    color:var(--text-faint);padding:0;
+  }
+  .fav-heart svg{fill:currentColor;}
+  .fav-heart:hover{color:var(--text-dim);}
+  .fav-heart.is-fav{color:#ff5d7a;}
+
+  /* ---------- Country chip rail ---------- */
+  .country-chip-rail{
+    display:flex;gap:8px;overflow-x:auto;padding:2px 20px 12px;
+    scrollbar-width:none;-ms-overflow-style:none;
+  }
+  .country-chip-rail::-webkit-scrollbar{display:none;}
+  .country-chip{
+    flex:none;display:flex;align-items:center;gap:6px;
+    background:var(--bg-elevated);border:1.5px solid var(--border);border-radius:10px;
+    padding:7px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--text-dim);cursor:pointer;
+    white-space:nowrap;transition:border-color .15s,color .15s,background .15s;
+  }
+  .country-chip:hover{border-color:var(--accent-dim);color:var(--text);}
+  .country-chip.is-selected{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);}
+  .country-chip .chip-count{
+    font-size:10px;font-weight:700;color:var(--text-faint);background:rgba(255,255,255,.08);
+    padding:1px 6px;border-radius:10px;
+  }
+  .country-chip.is-selected .chip-count{color:var(--accent);}
+  .chip-flag{font-size:14px;line-height:1;}
+  .chip-fav.is-selected{border-color:#ff5d7a;color:#ff5d7a;background:rgba(255,93,122,.12);}
+  .chip-fav.is-selected .chip-count{color:#ff5d7a;}
   .bubble:hover .ring, .bubble.active .ring{
     border-color:var(--accent);box-shadow:0 0 0 5px var(--accent-soft), 0 10px 22px -8px rgba(0,0,0,.6);
     background:#20272220;
@@ -721,6 +753,8 @@
       </div>
     </div>
   </div>
+
+  <div class="country-chip-rail" id="countryChipRail"></div>
 
   <div class="top-row">
 
@@ -982,6 +1016,7 @@
   const railCount = el('railCount');
   const metaLine = el('metaLine');
   const countrySel = el('countrySel');
+  const countryChipRail = el('countryChipRail');
   const categorySel = el('categorySel');
   const languageSel = el('languageSel');
   const searchInput = el('searchInput');
@@ -1551,6 +1586,63 @@
     if(!regionDisplayNames) return code;
     try{ return regionDisplayNames.of(code) || code; }catch(e){ return code; }
   }
+  // Regional Indicator Symbol flag emoji — offsetting each ASCII letter
+  // into the Unicode "Regional Indicator Symbol" block renders as that
+  // country's flag on essentially every modern OS's native emoji font
+  // (Windows/macOS/iOS/Android/most Linux desktops). No image assets or
+  // CDN dependency needed for something that's otherwise a whole SVG
+  // flag-icon set to source and maintain.
+  function countryFlagEmoji(code){
+    if(!code || code.length !== 2) return '🏳️';
+    return String.fromCodePoint(...[...code.toUpperCase()].map(c => 127397 + c.charCodeAt(0)));
+  }
+
+  // ---------- Country chip rail ----------
+  // Mirrors the country <select>'s own option list (see populateSelect
+  // below, which calls this whenever that select repopulates) — Fav and
+  // All are always present, then the same priority-ordered/alphabetical
+  // country list the select itself uses, so the two stay in sync without
+  // duplicating the filtering logic anywhere.
+  function renderCountryChips(countryValues){
+    countryChipRail.innerHTML = '';
+
+    const favChip = document.createElement('button');
+    favChip.type = 'button';
+    favChip.className = 'country-chip chip-fav' + (favoritesOnly ? ' is-selected' : '');
+    favChip.innerHTML = `<span class="chip-flag">♥</span>Fav<span class="chip-count">${favoriteIds.size}</span>`;
+    favChip.addEventListener('click', ()=>{
+      favoritesOnly = !favoritesOnly;
+      applyFilters();
+      renderCountryChips(countryValues);
+    });
+    countryChipRail.appendChild(favChip);
+
+    const allChip = document.createElement('button');
+    allChip.type = 'button';
+    allChip.className = 'country-chip' + (!countrySel.value ? ' is-selected' : '');
+    allChip.innerHTML = `<span class="chip-flag">🌐</span>All`;
+    allChip.addEventListener('click', ()=>{
+      if(countrySel.value === '') return;
+      countrySel.value = '';
+      refreshFilters();
+    });
+    countryChipRail.appendChild(allChip);
+
+    countryValues.forEach(v=>{
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'country-chip' + (countrySel.value === v ? ' is-selected' : '');
+      const label = v === UNSPECIFIED_FILTER_VALUE ? UNSPECIFIED_LABEL : countryDisplayName(v);
+      const flag = v === UNSPECIFIED_FILTER_VALUE ? '🏳️' : countryFlagEmoji(v);
+      chip.innerHTML = `<span class="chip-flag">${flag}</span>${label}`;
+      chip.addEventListener('click', ()=>{
+        if(countrySel.value === v) return;
+        countrySel.value = v;
+        refreshFilters();
+      });
+      countryChipRail.appendChild(chip);
+    });
+  }
 
   // Builds tvgId -> group-title (and name -> group-title as a fallback) maps
   // from companion playlists like index.country.m3u / index.language.m3u,
@@ -1646,6 +1738,7 @@
       selectEl.appendChild(o);
     });
     if(selectedValue && values.includes(selectedValue)) selectEl.value = selectedValue;
+    if(isCountrySelect) renderCountryChips(values);
   }
 
   async function loadPlaylist(urls, autoSelect, sourceName){
@@ -1761,6 +1854,35 @@
   }
 
   // ---------- Filtering & rendering ----------
+  // ---------- Favorites ----------
+  // tvg-id is the most stable identity a channel has across playlist
+  // reloads/source switches; falls back to a normalized name when it's
+  // absent (some custom/CSV sources never set tvg-id at all) — imperfect
+  // (two same-named channels from different sources would collide) but
+  // far better than losing every favorite on the next reload.
+  const FAVORITES_STORAGE_KEY = 'livetv_favorites_v1';
+  let favoriteIds = new Set();
+  try{
+    const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
+    if(raw) favoriteIds = new Set(JSON.parse(raw));
+  }catch(e){ /* corrupt/unavailable storage — starts empty, still functional */ }
+  function favoriteKeyFor(ch){ return ch.tvgId || `name:${normalizeName(ch.name)}`; }
+  function isFavorite(ch){ return favoriteIds.has(favoriteKeyFor(ch)); }
+  function saveFavorites(){
+    try{ localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Array.from(favoriteIds))); }catch(e){}
+  }
+  function toggleFavorite(ch){
+    const key = favoriteKeyFor(ch);
+    if(favoriteIds.has(key)) favoriteIds.delete(key); else favoriteIds.add(key);
+    saveFavorites();
+    updateFavoritesChipCount();
+  }
+  function updateFavoritesChipCount(){
+    const chip = document.querySelector('.chip-fav .chip-count');
+    if(chip) chip.textContent = String(favoriteIds.size);
+  }
+  let favoritesOnly = false;
+
   function applyFilters(){
     const country = countrySel.value;
     const category = categorySel.value;
@@ -1769,6 +1891,7 @@
     const workingOnly = workingOnlyToggle.checked;
 
     filtered = allChannels.filter(c=>{
+      if(favoritesOnly && !isFavorite(c)) return false;
       if(!fieldMatchesFilter(c.country, country)) return false;
       if(!fieldMatchesFilter(c.category, category)) return false;
       if(!fieldMatchesFilter(c.language, language)) return false;
@@ -1822,6 +1945,9 @@
     const vlcOnly = !capability.playable;
     b.innerHTML = `
       <div class="chnum">${idx + 1}</div>
+      <button type="button" class="fav-heart${isFavorite(ch) ? ' is-fav' : ''}" title="Favorite" data-fav-toggle>
+        <svg viewBox="0 0 24 24" width="12" height="12"><path d="M12 21s-7.5-4.6-10-9.3C.4 8.1 2.3 4 6.3 4c2.1 0 3.7 1.2 4.7 2.7C12 5.2 13.6 4 15.7 4c4 0 5.9 4.1 4.3 7.7C19.5 16.4 12 21 12 21z"/></svg>
+      </button>
       <div class="ring">
         <div class="ring-clip">
           ${ch.logo ? `<img data-src="${ch.logo}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
@@ -1832,6 +1958,16 @@
       </div>
       <div class="name" title="${ch.name.replace(/"/g,'&quot;')}">${ch.name}</div>
     `;
+    const favBtn = b.querySelector('[data-fav-toggle]');
+    favBtn.addEventListener('click', (e)=>{
+      e.stopPropagation(); // don't also select the channel
+      toggleFavorite(ch);
+      favBtn.classList.toggle('is-fav', isFavorite(ch));
+      // If the favorites-only chip is active, un-favoriting a channel
+      // should drop it out of the visible list immediately rather than
+      // leaving a stale entry until the next unrelated filter change.
+      if(favoritesOnly && !isFavorite(ch)) applyFilters();
+    });
     // hide fallback text once image loads
     const img = b.querySelector('img');
     const fb = b.querySelector('.fallback');
