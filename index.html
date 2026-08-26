@@ -1342,6 +1342,16 @@
     // was a real, silent cause of "no guide available" for channels we
     // actually had enough information for.
     if(ch.country && /^[A-Za-z]{2}$/.test(ch.country)) return ch.country.toUpperCase();
+    // Last resort: a tvg-id borrowed from iptv-org's own list by matching
+    // this channel's NAME against it (see hydrateGuideIdsFromIptvOrg) —
+    // only ever set for channels that got this far with nothing else to
+    // go on, i.e. a source whose own tvg-id/country tagging didn't work
+    // at all for this channel.
+    if(ch.guideTvgId){
+      const lastPart = ch.guideTvgId.split('.').pop();
+      const code = (lastPart || '').split('@')[0].split('(')[0].trim();
+      if(/^[A-Za-z]{2}$/.test(code)) return code.toUpperCase();
+    }
     return null;
   }
 
@@ -1492,13 +1502,15 @@
   }
 
   // Looks up a channel's programme list by, in order: its exact tvg-id, its
-  // tvg-id with any "@Subdivision"/"@Quality" suffix stripped, an exact
+  // tvg-id with any "@Subdivision"/"@Quality" suffix stripped, an id
+  // borrowed from iptv-org by name (see hydrateGuideIdsFromIptvOrg — only
+  // ever set when the channel's own tvg-id didn't work), an exact
   // normalized display-name match (any source), then a fuzzy substring
   // name match — restricted to country-scoped sources only, since a fuzzy
   // match against the global multi-country pool has no way to tell a
   // same-ish-named channel from a different country apart.
   function findGuideList(ch, result){
-    const idCandidates = [ch.tvgId, (ch.tvgId || '').split('@')[0]].filter(Boolean);
+    const idCandidates = [ch.tvgId, (ch.tvgId || '').split('@')[0], ch.guideTvgId].filter(Boolean);
     for(const cand of idCandidates){
       if(result.map.has(cand)) return result.map.get(cand);
       const lower = cand.toLowerCase();
@@ -1880,6 +1892,91 @@
     return {byId, byName};
   }
 
+  async function buildTvgIdMap(text){
+    // Same line-scanning approach as buildGroupMap, but capturing tvg-id
+    // instead of group-title, keyed by normalized display name (the same
+    // normalizeName() the guide-matching pipeline already uses everywhere
+    // else, so a name that matches here is guaranteed to match consistently
+    // downstream too).
+    const byName = new Map();
+    let curId = '', curName = '';
+    const len = text.length;
+    let pos = 0;
+    let iter = 0;
+    const YIELD_EVERY = 2000;
+    while(pos < len){
+      let nl = text.indexOf('\n', pos);
+      if(nl === -1) nl = len;
+      let line = text.slice(pos, nl);
+      pos = nl + 1;
+      if(line.endsWith('\r')) line = line.slice(0, -1);
+      iter++;
+      if(iter % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+      line = line.trim();
+      if(!line) continue;
+      if(line.startsWith('#EXTINF')){
+        const idMatch = line.match(/tvg-id="([^"]*)"/i);
+        const nameMatch = line.match(/,(.*)$/);
+        curId = idMatch ? idMatch[1] : '';
+        curName = nameMatch ? nameMatch[1].trim() : '';
+      } else if(!line.startsWith('#')){
+        if(curId && curName){
+          const norm = normalizeName(curName);
+          if(norm && !byName.has(norm)) byName.set(norm, curId);
+        }
+        curId = ''; curName = '';
+      }
+    }
+    return byName;
+  }
+
+  // ---------- Cross-referencing a non-iptv-org source's channels against
+  // iptv-org's own list, by name, to recover a usable tvg-id for the guide
+  // pipeline ----------
+  // countryCodeFor()/findGuideList() are built around iptv-org's own
+  // tvg-id convention ("CNN.us" — a country-code suffix, and an id shape
+  // epgshare01/epg.pw tend to at least partially align with). A channel
+  // loaded from a DIFFERENT source — the default World IPTV list, LG
+  // Channels/apsattv, or any custom URL — often has no tvg-id at all, or
+  // one built to an entirely different, incompatible convention (already
+  // confirmed directly: the default source tags country with full names
+  // like "Afghanistan" rather than 2-letter codes, which is exactly this
+  // same class of problem one level up). Matching that channel's NAME
+  // against iptv-org's own list recovers a genuinely guide-compatible id
+  // for it — the whole point being that iptv-org is the dataset
+  // epgshare01/epg.pw's own conventions are most likely to line up with,
+  // even when the channel didn't originally come from there.
+  //
+  // Stored separately (ch.guideTvgId), not written over ch.tvgId — the
+  // channel's own original tvg-id (or lack of one) is still meaningful
+  // elsewhere (search-by-tvgid, favorites identity) and shouldn't be
+  // silently replaced by a borrowed id that's only valid for guide
+  // lookups specifically.
+  let iptvOrgNameToTvgId = null; // cached across calls for the session — same reasoning as xmltvCache
+  async function hydrateGuideIdsFromIptvOrg(sourceUrls){
+    // Already iptv-org's own list — every channel already has iptv-org's
+    // native tvg-id (or doesn't, but a self-referential lookup wouldn't
+    // fix that), so there's nothing to cross-reference.
+    if(sourceUrls.some(u => u === SOURCES.main[0])) return;
+
+    if(!iptvOrgNameToTvgId){
+      const text = await fetchWithFallback(SOURCES.main);
+      if(!text) return; // iptv-org itself unreachable right now — channels just keep whatever id (or none) they already had
+      iptvOrgNameToTvgId = await buildTvgIdMap(text);
+    }
+
+    const YIELD_EVERY = 1500;
+    let recovered = 0;
+    for(let i=0;i<allChannels.length;i++){
+      if(i > 0 && i % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+      const ch = allChannels[i];
+      if(countryCodeFor(ch)) continue; // already has enough identity to resolve a guide country — no need to borrow one
+      const match = iptvOrgNameToTvgId.get(normalizeName(ch.name));
+      if(match){ ch.guideTvgId = match; recovered++; }
+    }
+    if(recovered) console.info(`Guide: recovered a usable tvg-id for ${recovered} channel(s) by cross-referencing against iptv-org's list.`);
+  }
+
   async function fetchWithFallback(urls){
     for(const url of urls){
       // Direct first — works for any source with proper CORS (all of
@@ -2001,6 +2098,15 @@
     // parse/render is exactly the kind of back-to-back CPU load a phone
     // is most likely to choke on right at page load.
     runWhenIdle(hydrateCountryAndLanguage);
+    // Same idle-deferred treatment for recovering guide-compatible ids
+    // from iptv-org's own list, by name, for channels the current source
+    // (if it isn't iptv-org's own list) didn't already give a working one
+    // to — see hydrateGuideIdsFromIptvOrg above for why this is needed at
+    // all. Independent of hydrateCountryAndLanguage (that one only ever
+    // touches ch.country/ch.language; this one only ever touches
+    // ch.guideTvgId), so either can fail/be slow without blocking the
+    // other.
+    runWhenIdle(() => hydrateGuideIdsFromIptvOrg(sourceUrls));
   }
 
   async function hydrateCountryAndLanguage(){
@@ -3164,12 +3270,52 @@
   // channel always shows a real frame well within the grace period and
   // never reaches this fallback-install branch at all.
   const NO_VIDEO_CHECK_DELAY = 10000; // long enough to clear normal startup buffering
+  // Samples a small region of the current frame to check it's actually
+  // showing something, not just reporting valid dimensions — a decoder
+  // can produce a correctly-sized frame while still failing to decode
+  // real pixel data into it (confirmed: exactly this — audio fine,
+  // dimensions present, picture solid black — happens against the HEVC
+  // WASM fallback on content it evidently can't fully handle; a
+  // dimension-only check treats that as success and never catches it).
+  // Best-effort: most channels play through a proxy, so the <video> is
+  // cross-origin without CORS headers, which taints the canvas and
+  // throws on getImageData() — treated as "can't tell" (null), not "it's
+  // blank" (true), so this never produces a false report on the
+  // majority of channels it structurally can't inspect.
+  function sampleFrameIsBlack(){
+    try{
+      const canvas = document.createElement('canvas');
+      canvas.width = 12; canvas.height = 12;
+      const ctx = canvas.getContext('2d', {willReadFrequently:true});
+      ctx.drawImage(video, 0, 0, 12, 12);
+      const data = ctx.getImageData(0, 0, 12, 12).data;
+      for(let i=0; i<data.length; i+=4){
+        if(data[i] > 8 || data[i+1] > 8 || data[i+2] > 8) return false; // real color found — not blank
+      }
+      return true;
+    }catch(e){
+      return null; // tainted (cross-origin) canvas or other failure — inconclusive, not evidence of anything
+    }
+  }
   function checkForAudioOnlyPlayback(ch, token){
     setTimeout(async ()=>{
       if(token !== playbackToken) return;           // channel switched since — not relevant anymore
       if(video.paused || video.ended) return;        // not actually playing — a different problem (the stall watchdog covers that)
-      if(video.videoWidth > 0 || video.videoHeight > 0) return; // a real frame showed up — genuinely fine
       if(video.currentTime <= 0) return;             // hasn't actually started progressing at all yet either — not this specific case
+
+      let noRealPicture = video.videoWidth === 0 && video.videoHeight === 0;
+      if(!noRealPicture){
+        // Dimensions look fine, but that alone doesn't prove there's an
+        // actual picture — double-sampled a beat apart so a single dark
+        // or transitional frame (a scene cut, a black ad slate) doesn't
+        // produce a false positive.
+        if(sampleFrameIsBlack() === true){
+          await new Promise(r => setTimeout(r, 500));
+          if(token !== playbackToken) return;
+          if(sampleFrameIsBlack() === true) noRealPicture = true;
+        }
+      }
+      if(!noRealPicture) return; // a real, non-blank frame showed up — genuinely fine
 
       // First time this specific channel hits this: try the HEVC
       // fallback decoder and give it one real retry before giving up.
@@ -3191,7 +3337,7 @@
 
       const triedFallback = ch._triedHevcFallback === true;
       const reason = triedFallback
-        ? 'its video still isn\u2019t decoding even with the built-in HEVC fallback decoder — this device may be too slow for real-time software decode'
+        ? 'its video still isn\u2019t showing a real picture even with the built-in HEVC fallback decoder — this content may use something even that decoder can\u2019t fully handle'
         : 'its video most likely isn\u2019t decodable in this browser (commonly HEVC/H.265)';
       showToast(`"${ch.name}" is playing audio only — ${reason}. Try the VLC button.`);
       markChannelUnplayable(ch, `Playing audio only — ${reason} — open in VLC instead`);
