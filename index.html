@@ -1195,6 +1195,21 @@
   const audioFxToggle = el('audioFxToggle');
   const settingsBtn = el('settingsBtn');
   const settingsPanel = el('settingsPanel');
+  // Reparented to <body>, out of .player-frame/.controls entirely — not
+  // just a style tweak. .controls has its own CSS transform (for its
+  // slide-up hover animation), and a transform on ANY ancestor creates a
+  // new containing block for position:fixed descendants — meaning
+  // settingsPanel's position:fixed was actually resolving relative to
+  // .controls all along, not the viewport, completely defeating the
+  // point of making it fixed in the first place (it was still trapped
+  // inside .player-frame's overflow:hidden clipping either way). Moving
+  // it to be a direct child of <body> removes every transformed/
+  // clipping ancestor between it and the viewport for good — this is
+  // the actual fix, not a CSS property. Safe to do: everything
+  // downstream references it via this `settingsPanel` variable (or its
+  // id), never via DOM traversal from its original parent, so moving it
+  // doesn't break anything else.
+  document.body.appendChild(settingsPanel);
   const subtitleRow = el('subtitleRow');
   const subtitleToggle = el('subtitleToggle');
   const pictureModeRow = el('pictureModeRow');
