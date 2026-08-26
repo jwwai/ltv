@@ -1327,6 +1327,28 @@
     return isNaN(d.getTime()) ? null : d;
   }
   function countryCodeFor(ch){
+    // Checked FIRST, ahead of the channel's own tvg-id — confirmed
+    // reason: aggregator sources built from many different upstream
+    // lists (the default source specifically pulls from 50+ separate
+    // public playlists) mix wildly different tvg-id conventions
+    // channel-to-channel, depending on which upstream source that exact
+    // entry happened to come from — Samsung TV Plus-style opaque ids,
+    // Pluto-style hash ids, iptv-org-style ".us"-suffixed ids, all mixed
+    // together in the same list. That means a channel's own tvg-id
+    // is NOT a reliable signal on those sources, even when it happens
+    // to superficially look like a valid 2-letter-suffixed code — it
+    // can resolve to a real but WRONG country, which is exactly why the
+    // same channel's guide could show a different source count
+    // depending on which playlist happened to be loaded. iptv-org's own
+    // convention is what epgshare01/epg.pw's own data is actually most
+    // likely to line up with, so a confirmed name match against
+    // iptv-org's dataset (see hydrateGuideIdsFromIptvOrg) wins whenever
+    // one exists, even over the channel's own tvg-id.
+    if(ch.guideTvgId){
+      const lastPart = ch.guideTvgId.split('.').pop();
+      const code = (lastPart || '').split('@')[0].split('(')[0].trim();
+      if(/^[A-Za-z]{2}$/.test(code)) return code.toUpperCase();
+    }
     if(ch.tvgId){
       const lastPart = ch.tvgId.split('.').pop();
       const code = (lastPart || '').split('@')[0].split('(')[0].trim();
@@ -1342,16 +1364,6 @@
     // was a real, silent cause of "no guide available" for channels we
     // actually had enough information for.
     if(ch.country && /^[A-Za-z]{2}$/.test(ch.country)) return ch.country.toUpperCase();
-    // Last resort: a tvg-id borrowed from iptv-org's own list by matching
-    // this channel's NAME against it (see hydrateGuideIdsFromIptvOrg) —
-    // only ever set for channels that got this far with nothing else to
-    // go on, i.e. a source whose own tvg-id/country tagging didn't work
-    // at all for this channel.
-    if(ch.guideTvgId){
-      const lastPart = ch.guideTvgId.split('.').pop();
-      const code = (lastPart || '').split('@')[0].split('(')[0].trim();
-      if(/^[A-Za-z]{2}$/.test(code)) return code.toUpperCase();
-    }
     return null;
   }
 
@@ -1510,7 +1522,10 @@
   // match against the global multi-country pool has no way to tell a
   // same-ish-named channel from a different country apart.
   function findGuideList(ch, result){
-    const idCandidates = [ch.tvgId, (ch.tvgId || '').split('@')[0], ch.guideTvgId].filter(Boolean);
+    // guideTvgId checked first — same reasoning as countryCodeFor above:
+    // a confirmed iptv-org name match is more trustworthy than an
+    // aggregator source's own (potentially heterogeneous-origin) tvg-id.
+    const idCandidates = [ch.guideTvgId, ch.tvgId, (ch.tvgId || '').split('@')[0]].filter(Boolean);
     for(const cand of idCandidates){
       if(result.map.has(cand)) return result.map.get(cand);
       const lower = cand.toLowerCase();
@@ -1970,11 +1985,21 @@
     for(let i=0;i<allChannels.length;i++){
       if(i > 0 && i % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
       const ch = allChannels[i];
-      if(countryCodeFor(ch)) continue; // already has enough identity to resolve a guide country — no need to borrow one
+      // Deliberately NOT skipped just because countryCodeFor(ch) already
+      // resolves something via the channel's own tvg-id — confirmed this
+      // needs to run unconditionally: an aggregator source built from
+      // many different upstream lists mixes wildly different tvg-id
+      // conventions channel-to-channel (Samsung TV Plus-style opaque
+      // ids, Pluto-style hash ids, iptv-org-style ids, all in the same
+      // playlist), so a channel's own tvg-id "resolving to something" is
+      // no guarantee it resolved to the RIGHT thing. countryCodeFor
+      // above already prefers guideTvgId over the channel's own tvg-id
+      // once it's set, specifically so a confirmed iptv-org name match
+      // always wins over an unreliable one.
       const match = iptvOrgNameToTvgId.get(normalizeName(ch.name));
       if(match){ ch.guideTvgId = match; recovered++; }
     }
-    if(recovered) console.info(`Guide: recovered a usable tvg-id for ${recovered} channel(s) by cross-referencing against iptv-org's list.`);
+    if(recovered) console.info(`Guide: found an iptv-org cross-reference for ${recovered} channel(s) by name.`);
   }
 
   async function fetchWithFallback(urls){
