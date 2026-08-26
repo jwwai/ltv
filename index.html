@@ -421,8 +421,21 @@
 
   /* ---------- Consolidated settings panel ---------- */
   .settings-wrap{position:relative;}
+  /* position:fixed (not absolute) deliberately — .player-frame has
+     overflow:hidden (needed to keep its corners rounded), which was
+     silently clipping this panel whenever its content was taller than
+     the player itself. That's not just a mobile problem — it happens on
+     desktop too whenever the player's rendered height is short relative
+     to how much content the panel has to show (exactly what the
+     screenshot that flagged this showed). Fixed positioning anchored to
+     the viewport, not the player, escapes that clipping entirely
+     regardless of screen size — genuinely renders outside the player's
+     bounds. Desktop gets its top/left set in JS (see settingsBtn's click
+     handler) so it still opens right next to the gear icon rather than
+     defaulting to a corner; mobile overrides this into a full-width
+     bottom sheet instead — see @media(max-width:640px) below. */
   .settings-panel{
-    position:absolute;bottom:calc(100% + 8px);right:0;z-index:25;
+    position:fixed;z-index:70;
     background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;
     padding:12px;box-shadow:var(--card-shadow);width:250px;max-height:min(70vh,560px);
     overflow-y:auto;display:flex;flex-direction:column;gap:10px;
@@ -843,21 +856,16 @@
       box-shadow:0 6px 16px rgba(0,0,0,.45);
     }
     /* .player-frame has overflow:hidden (needed to keep its corners
-       rounded) — which was silently clipping the settings panel
-       whenever its content was taller than the player itself, very
-       likely on mobile specifically: the player's actual pixel height
-       is small on a narrow screen (16:9 at mobile width isn't tall),
-       while the panel's content height stays roughly constant regardless
-       of screen size. Fixed positioning anchored to the viewport instead
-       of the player escapes that clipping entirely — genuinely renders
-       outside the player's bounds now, as a bottom sheet, rather than a
-       popover fighting for room inside it. */
+       rounded) — same underlying issue as the desktop fix above, but on
+       mobile the fix is a full-width bottom sheet instead of a
+       button-anchored popover (a narrow screen doesn't have room for a
+       floating panel positioned next to a small gear icon). */
     .settings-panel{
       position:fixed;top:auto;bottom:0;left:0;right:0;
       width:100%;max-width:100%;max-height:75vh;
       border-radius:16px 16px 0 0;
       box-shadow:0 -10px 30px rgba(0,0,0,.55);
-      z-index:60;
+      z-index:70;
     }
   }
 </style>
@@ -3903,9 +3911,35 @@
   // existing internal open/close logic exactly as before (they're
   // rendered as nested accordion rows within this panel now, not
   // separate floating popovers), this just handles the outer container.
+  //
+  // The panel is position:fixed (see CSS) specifically so it can never
+  // be clipped by .player-frame's overflow:hidden, regardless of screen
+  // size — but position:fixed with no inset values just defaults to the
+  // top-left corner of the viewport, so on desktop this computes real
+  // coordinates from the button's own on-screen position each time it
+  // opens, anchoring the panel right below-and-left of the gear icon the
+  // way the old position:absolute popover used to, just without the
+  // clipping bug. Mobile's CSS (@media max-width:640px) already pins it
+  // to a full-width bottom sheet regardless of these values, so this is
+  // skipped there entirely — setting inline left/right here would
+  // otherwise fight with that rule's own left:0/right:0.
+  function positionSettingsPanelDesktop(){
+    if(window.innerWidth <= 640) return;
+    const btnRect = settingsBtn.getBoundingClientRect();
+    const panelWidth = 250;
+    const margin = 10;
+    let left = btnRect.right - panelWidth;
+    left = Math.max(margin, Math.min(left, window.innerWidth - panelWidth - margin));
+    let top = btnRect.top - 8; // panel's own max-height + flex column keeps it growing upward visually via bottom-anchoring below
+    settingsPanel.style.left = `${left}px`;
+    settingsPanel.style.right = 'auto';
+    settingsPanel.style.bottom = `${window.innerHeight - top}px`;
+    settingsPanel.style.top = 'auto';
+  }
   settingsBtn.addEventListener('click', (e)=>{
     e.stopPropagation();
     const opening = settingsPanel.style.display === 'none' || !settingsPanel.style.display;
+    if(opening) positionSettingsPanelDesktop();
     settingsPanel.style.display = opening ? 'flex' : 'none';
     settingsBtn.classList.toggle('is-open', opening);
     if(!opening){
@@ -3917,6 +3951,9 @@
       routePanel.style.display = 'none';
       routeBtn.classList.remove('is-open');
     }
+  });
+  window.addEventListener('resize', ()=>{
+    if(settingsPanel.style.display !== 'none') positionSettingsPanelDesktop();
   });
   document.addEventListener('click', (e)=>{
     if(settingsPanel.style.display !== 'none' && !settingsPanel.contains(e.target) && e.target !== settingsBtn){
