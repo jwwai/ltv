@@ -156,6 +156,8 @@
     -webkit-font-smoothing:antialiased;
   }
   .shell{max-width:1180px;margin:0 auto;padding:26px 20px 56px;}
+  .body-row{display:flex;gap:18px;align-items:flex-start;}
+  .main-col{flex:1;min-width:0;}
 
   /* ---------- Header ---------- */
   .wordmark{
@@ -458,110 +460,131 @@
 
   .rail-wrap{position:relative;}
   .rail{
-    display:flex;align-items:center;gap:20px;overflow-x:auto;overflow-y:visible;
-    padding:18px 64px 22px;scroll-behavior:smooth;cursor:grab;
-    scrollbar-width:thin;scrollbar-color:#2a2f3a transparent;
-    overscroll-behavior:contain;
+    display:grid;grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));
+    gap:14px;padding:4px 2px 22px;
   }
-  .rail.dragging{cursor:grabbing;scroll-behavior:auto;user-select:none;}
-  .rail::-webkit-scrollbar{height:6px;}
-  .rail::-webkit-scrollbar-thumb{background:#242a34;border-radius:6px;}
-  .rail::-webkit-scrollbar-track{background:transparent;}
-
+  .sentinel{grid-column:1 / -1;height:1px;}
+  /* ---------- Channel tiles (grid layout) ----------
+     Redesigned from a horizontal-scrolling row of circular bubbles into
+     a proper grid of cards — matches the reference design (and both
+     mockups) far more closely than a single scrolling strip does, and
+     scales better to a screen full of channels rather than a narrow
+     horizontal ribbon. Class name kept as .bubble rather than renamed
+     throughout the JS (bubbleNode(), markActiveBubble(), the image
+     lazy-load observer, etc. all reference it) — only the visual
+     treatment changed here, not the element identity. */
   .bubble{
-    flex:none;width:78px;display:flex;flex-direction:column;align-items:center;gap:8px;
-    position:relative;transition:transform .18s cubic-bezier(.2,.8,.3,1.3);
-    transform-origin:center bottom;will-change:transform;
-    content-visibility:auto;contain-intrinsic-size:78px 104px;
+    display:flex;flex-direction:column;gap:10px;
+    position:relative;cursor:pointer;
+    background:var(--bg-panel);border:1px solid var(--border);border-radius:16px;
+    padding:12px;transition:border-color .15s ease, transform .15s ease, background .15s ease;
+    content-visibility:auto;contain-intrinsic-size:auto 176px;
+  }
+  .bubble:hover{border-color:var(--accent-dim);transform:translateY(-2px);}
+  .bubble.active{
+    border-color:var(--accent);
+    background:linear-gradient(165deg, var(--accent-soft), var(--bg-panel) 60%);
   }
   .bubble .ring{
-    width:64px;height:64px;border-radius:50%;background:var(--bg-bubble);
-    border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;
-    cursor:pointer;position:relative;
-    transition:border-color .18s, box-shadow .18s, background .18s;
+    width:100%;aspect-ratio:1;border-radius:12px;background:var(--bg-bubble);
+    border:1px solid var(--border-soft);display:flex;align-items:center;justify-content:center;
+    position:relative;overflow:hidden;
   }
   .bubble .ring-clip{
-    width:100%;height:100%;border-radius:50%;overflow:hidden;
+    width:100%;height:100%;border-radius:12px;overflow:hidden;
     display:flex;align-items:center;justify-content:center;
   }
-  .bubble .ring img{width:72%;height:72%;object-fit:contain;pointer-events:none;}
+  .bubble .ring img{width:74%;height:74%;object-fit:contain;pointer-events:none;}
   .bubble .ring .fallback{
-    font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:16px;color:var(--text-dim);
+    font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:22px;color:var(--text-dim);
   }
   .bubble .status-dot{
-    position:absolute;bottom:-1px;right:-1px;width:12px;height:12px;border-radius:50%;
-    border:2px solid var(--bg);display:none;z-index:2;
+    position:absolute;bottom:8px;right:8px;width:9px;height:9px;border-radius:50%;
+    border:2px solid var(--bg-panel);display:none;z-index:2;
   }
   .bubble.check-ok .status-dot{display:block;background:var(--accent);}
   .bubble.check-fail .status-dot{display:block;background:var(--danger);}
   .bubble.check-fail .ring{opacity:.45;}
   .bubble.check-fail .name{opacity:.55;}
   .bubble .vlc-badge{
-    position:absolute;top:0;right:2px;z-index:1;
-    background:var(--bg-elevated);border:1px solid #a8792f;color:#e0a94a;
-    font-size:8px;font-weight:800;letter-spacing:.3px;line-height:1;padding:3px 4px;border-radius:20px;
+    position:absolute;top:8px;right:8px;z-index:1;
+    background:rgba(10,12,16,.75);border:1px solid #a8792f;color:#e0a94a;
+    font-size:8.5px;font-weight:800;letter-spacing:.3px;line-height:1;padding:3px 5px;border-radius:20px;
   }
   .bubble .chnum{
-    position:absolute;top:0;left:2px;z-index:1;
-    background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-faint);
+    position:absolute;top:8px;left:8px;z-index:1;
+    background:rgba(10,12,16,.75);border:1px solid var(--border);color:var(--text-faint);
     font-size:9px;font-weight:700;line-height:1;padding:3px 5px;border-radius:20px;
     font-variant-numeric:tabular-nums;
   }
   .bubble.active .chnum{border-color:var(--accent);color:var(--accent);}
   .fav-heart{
-    position:absolute;bottom:-1px;left:-1px;z-index:2;width:18px;height:18px;
-    border-radius:50%;background:var(--bg-elevated);border:2px solid var(--bg);
+    position:absolute;bottom:8px;left:8px;z-index:2;width:22px;height:22px;
+    border-radius:50%;background:rgba(10,12,16,.75);border:none;
     display:flex;align-items:center;justify-content:center;cursor:pointer;
-    color:var(--text-faint);padding:0;
+    color:rgba(255,255,255,.7);padding:0;
   }
-  .fav-heart svg{fill:currentColor;}
-  .fav-heart:hover{color:var(--text-dim);}
-  .fav-heart.is-fav{color:#ff5d7a;}
+  .fav-heart svg{fill:currentColor;width:12px;height:12px;}
+  .fav-heart:hover{color:#fff;}
+  .fav-heart.is-fav{color:var(--danger);}
 
-  /* ---------- Country chip rail ---------- */
+  /* ---------- Country sidebar rail ----------
+     Desktop: a genuine vertical sidebar, sticky down the left edge —
+     flag + name + count per row, matching the reference design's country
+     list exactly. Reverted to a horizontal labeled strip on mobile — see
+     @media(max-width:960px) below — where a full-height vertical sidebar
+     wouldn't leave useful room for anything else on a narrow screen. */
   .country-chip-rail{
-    display:flex;gap:8px;overflow-x:auto;padding:2px 20px 12px;
-    scrollbar-width:none;-ms-overflow-style:none;
+    flex:0 0 220px;display:flex;flex-direction:column;gap:3px;
+    overflow-y:auto;overflow-x:visible;max-height:calc(100vh - 52px);
+    position:sticky;top:26px;padding:2px 4px 12px 2px;
+    scrollbar-width:thin;scrollbar-color:var(--border) transparent;
   }
-  .country-chip-rail::-webkit-scrollbar{display:none;}
+  .country-chip-rail::-webkit-scrollbar{width:6px;}
+  .country-chip-rail::-webkit-scrollbar-thumb{background:var(--border);border-radius:99px;}
   .country-chip{
-    flex:none;display:flex;align-items:center;gap:6px;
-    background:var(--bg-elevated);border:1.5px solid var(--border);border-radius:10px;
-    padding:7px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--text-dim);cursor:pointer;
-    white-space:nowrap;transition:border-color .15s,color .15s,background .15s;
+    flex:none;width:100%;display:flex;align-items:center;gap:10px;
+    background:transparent;border:1px solid transparent;border-radius:10px;
+    padding:8px 10px;font:inherit;font-size:13.5px;font-weight:500;color:var(--text-dim);cursor:pointer;
+    white-space:nowrap;transition:border-color .12s,color .12s,background .12s;
+    text-align:left;
   }
-  .country-chip:hover{border-color:var(--accent-dim);color:var(--text);}
-  .country-chip.is-selected{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);}
+  .country-chip:hover{background:var(--bg-elevated);color:var(--text);}
+  .country-chip.is-selected{
+    background:linear-gradient(90deg, var(--accent-soft), transparent);
+    border-color:var(--accent-dim);color:var(--text);
+  }
+  .country-chip .chip-flag{
+    width:26px;height:26px;flex:none;border-radius:7px;background:var(--bg-bubble);
+    display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;
+  }
+  .country-chip .chip-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .country-chip .chip-count{
-    font-size:10px;font-weight:700;color:var(--text-faint);background:rgba(255,255,255,.08);
-    padding:1px 6px;border-radius:10px;
+    flex:none;font-size:10.5px;font-weight:700;color:var(--text-faint);
+    background:var(--bg-bubble);padding:2px 7px;border-radius:99px;
   }
   .country-chip.is-selected .chip-count{color:var(--accent);}
-  .chip-flag{font-size:14px;line-height:1;}
-  .chip-fav.is-selected{border-color:#ff5d7a;color:#ff5d7a;background:rgba(255,93,122,.12);}
-  .chip-fav.is-selected .chip-count{color:#ff5d7a;}
-  .bubble:hover .ring, .bubble.active .ring{
-    border-color:var(--accent);box-shadow:0 0 0 5px var(--accent-soft), 0 10px 22px -8px rgba(0,0,0,.6);
-    background:#20272220;
-  }
-  .bubble.active .ring{background:#16241d;}
+  .chip-fav.is-selected{border-color:rgba(255,93,122,.4);}
+  .chip-fav.is-selected .chip-flag{color:var(--danger);}
+  .chip-fav.is-selected .chip-count{color:var(--danger);}
+
   .bubble .name{
-    font-size:11px;color:var(--text-dim);text-align:center;line-height:1.25;
-    max-width:76px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
+    font-size:12.5px;font-weight:600;color:var(--text-dim);line-height:1.3;
+    overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
     -webkit-line-clamp:2;-webkit-box-orient:vertical;
     transition:color .15s;
   }
-  .bubble:hover .name, .bubble.active .name{color:var(--text);}
-  .bubble.active .name{color:var(--accent);font-weight:600;}
-
-  .rail-edge{
-    position:absolute;top:0;bottom:0;width:56px;pointer-events:none;z-index:2;
-  }
-  .rail-edge.l{left:0;background:linear-gradient(to right, var(--bg) 10%, transparent);}
-  .rail-edge.r{right:0;background:linear-gradient(to left, var(--bg) 10%, transparent);}
+  .bubble:hover .name{color:var(--text);}
+  .bubble.active .name{color:var(--accent);}
+  /* .rail-edge (the old horizontal-scroll hover-arrows) is unused now
+     that the channel list is a grid, not a scrolling strip — left the
+     HTML elements in place (harmless, invisible) rather than pull them
+     out along with everything that referenced them, but no CSS targets
+     them anymore. */
 
   .rail-empty, .rail-loading{
     padding:30px 10px;color:var(--text-faint);font-size:13px;text-align:center;width:100%;
+    grid-column:1 / -1;
   }
   .spinner{
     width:16px;height:16px;border-radius:50%;border:2px solid var(--border);
@@ -667,21 +690,44 @@
   footer a{color:var(--text-dim);}
 
   @media (max-width:960px){
-    /* Reorders to: header, video, channel rack, search/filters, guide,
-       footer — display:contents "unwraps" top-row so its two children
-       (player-frame and side-col) become directly reorderable alongside
-       rail-head/rail-wrap instead of being stuck adjacent to each other
-       as a pair. No DOM changes needed, just how the existing elements
-       are allowed to flow on a narrow screen. */
-    .shell{display:flex;flex-direction:column;}
-    .wordmark{order:0;}
+    /* Reorders to: header, country chips, video, channel rack,
+       search/filters, guide, footer. .body-row/.main-col replace .shell
+       as the flex containers now (they didn't exist when this rule was
+       first written) — .wordmark and <footer> live outside both,
+       full-width, so they're untouched by any of this; the country chip
+       rail also lives outside .main-col (it's .body-row's other flex
+       item, stacked above it below), so it only needs its own treatment
+       reverted back to a horizontal strip, not an order value. display:
+       contents "unwraps" top-row so its two children (player-frame and
+       side-col) become directly reorderable alongside rail-head/rail-wrap
+       instead of being stuck adjacent to each other as a pair. */
+    .body-row{flex-direction:column;}
+    .main-col{display:flex;flex-direction:column;width:100%;}
     .top-row{display:contents;}
     .player-frame{order:1;}
     .rail-head{order:2;}
     .rail-wrap{order:3;}
     .side-col{order:4;width:100%;flex:0 0 auto;}
-    footer{order:5;}
     .guide-or-logo{flex:0 0 300px;max-height:300px;height:300px!important;}
+    /* Country rail reverts to a horizontal labeled strip — a vertical
+       icon-only sidebar (the desktop treatment above) wouldn't leave
+       useful room for anything else on a narrow screen, and the mobile
+       reference design itself shows this as a horizontal row. */
+    .country-chip-rail{
+      flex:0 0 auto;flex-direction:row;overflow-x:auto;overflow-y:visible;
+      max-height:none;position:static;width:100%;padding:2px 20px 12px;
+    }
+    .country-chip{
+      width:auto;aspect-ratio:auto;padding:7px 12px;border-radius:10px;gap:6px;
+    }
+    .country-chip .chip-label{display:inline;}
+    .country-chip .chip-count{
+      display:inline-block;font-size:10px;font-weight:700;color:var(--text-faint);
+      background:rgba(255,255,255,.08);padding:1px 6px;border-radius:10px;
+    }
+    .country-chip.is-selected .chip-count{color:var(--accent);}
+    .chip-fav.is-selected .chip-count{color:#ff5d7a;}
+    .chip-flag{font-size:14px;}
   }
   @media (max-width:640px){
     .filter-row{flex-direction:column;align-items:stretch;}
@@ -699,14 +745,26 @@
     .field select, .field input, .source-panel select, .source-panel input{
       font-size:16px;
     }
-    /* Keeps the player in view while scrolling through the channel
-       list/guide/filters below it, instead of it scrolling away entirely
-       — sticks to the very top of the viewport once scrolled past the
-       header above it. Pure CSS (position:sticky), no JS/scroll-listener
-       needed. Desktop/tablet layouts keep the player in a fixed spot
-       within the grid already, so this is mobile-only. */
+    /* Keeps the header (Live TV bar + source picker), country chip rail,
+       AND the player all reachable while scrolling — stacked, in that
+       order, at the top of the viewport, rather than only the player
+       being sticky. That was a real regression: sticking JUST the player
+       to top:0 meant the header (and the channel-source picker inside
+       it) scrolled up and out of view the moment you scrolled at all,
+       leaving no way back to it without scrolling all the way back up.
+       position:sticky can't stack multiple elements automatically (each
+       one's "top" offset is independent, not cumulative) — the actual
+       pixel offsets are computed and kept in sync by
+       syncMobileStickyOffsets() in the main script, not hardcoded here,
+       so this stays correct if the header's real height ever changes. */
+    .wordmark{
+      position:sticky;top:0;z-index:35;background:var(--bg);
+    }
+    .country-chip-rail{
+      position:sticky;top:var(--wordmark-h,52px);z-index:34;background:var(--bg);
+    }
     .player-frame{
-      position:sticky;top:0;z-index:30;
+      position:sticky;top:var(--header-total-h,96px);z-index:30;
       background:var(--bg);
       box-shadow:0 6px 16px rgba(0,0,0,.45);
     }
@@ -754,8 +812,9 @@
     </div>
   </div>
 
+  <div class="body-row">
   <div class="country-chip-rail" id="countryChipRail"></div>
-
+  <div class="main-col">
   <div class="top-row">
 
     <div class="player-frame" id="playerFrame">
@@ -920,6 +979,8 @@
       <div class="rail-loading" id="railStatus"><span class="spinner"></span>Fetching channel list…</div>
     </div>
   </div>
+  </div>
+  </div>
 
   <footer>
     Streams sourced from the community-maintained <a href="https://github.com/iptv-org/iptv" target="_blank" rel="noopener">iptv-org</a> playlist,
@@ -1017,6 +1078,7 @@
   const metaLine = el('metaLine');
   const countrySel = el('countrySel');
   const countryChipRail = el('countryChipRail');
+  const wordmarkEl = document.querySelector('.wordmark');
   const categorySel = el('categorySel');
   const languageSel = el('languageSel');
   const searchInput = el('searchInput');
@@ -1570,7 +1632,13 @@
   // set of countries most people actually want. Category/Language stay
   // plain alphabetical (via uniqueSorted) — there's no single obviously
   // "most wanted" ordering for those the way there is for country.
-  const COUNTRY_PRIORITY_ORDER = ['IN','US','DE','CN','FR','CA'];
+  // India, US, Australia, then the UK — both 'UK' and 'GB' are listed
+  // since different playlist sources tag British channels differently
+  // (iptv-org's own tvg-id convention uses ".uk", but ISO 3166-1's
+  // official code is "GB" — whichever one actually shows up in a given
+  // channel's data gets prioritized; having both here is harmless since
+  // only the one with real matching channels ever renders as a chip).
+  const COUNTRY_PRIORITY_ORDER = ['IN','US','AU','UK','GB'];
   function orderCountryOptions(named){
     const priority = COUNTRY_PRIORITY_ORDER.filter(cc => named.includes(cc));
     const rest = named.filter(cc => !COUNTRY_PRIORITY_ORDER.includes(cc)).sort((a,b)=>a.localeCompare(b));
@@ -1609,7 +1677,8 @@
     const favChip = document.createElement('button');
     favChip.type = 'button';
     favChip.className = 'country-chip chip-fav' + (favoritesOnly ? ' is-selected' : '');
-    favChip.innerHTML = `<span class="chip-flag">♥</span>Fav<span class="chip-count">${favoriteIds.size}</span>`;
+    favChip.title = 'Favorites';
+    favChip.innerHTML = `<span class="chip-flag">♥</span><span class="chip-label">Fav</span><span class="chip-count">${favoriteIds.size}</span>`;
     favChip.addEventListener('click', ()=>{
       favoritesOnly = !favoritesOnly;
       applyFilters();
@@ -1620,7 +1689,8 @@
     const allChip = document.createElement('button');
     allChip.type = 'button';
     allChip.className = 'country-chip' + (!countrySel.value ? ' is-selected' : '');
-    allChip.innerHTML = `<span class="chip-flag">🌐</span>All`;
+    allChip.title = 'All countries';
+    allChip.innerHTML = `<span class="chip-flag">🌐</span><span class="chip-label">All</span>`;
     allChip.addEventListener('click', ()=>{
       if(countrySel.value === '') return;
       countrySel.value = '';
@@ -1634,7 +1704,8 @@
       chip.className = 'country-chip' + (countrySel.value === v ? ' is-selected' : '');
       const label = v === UNSPECIFIED_FILTER_VALUE ? UNSPECIFIED_LABEL : countryDisplayName(v);
       const flag = v === UNSPECIFIED_FILTER_VALUE ? '🏳️' : countryFlagEmoji(v);
-      chip.innerHTML = `<span class="chip-flag">${flag}</span>${label}`;
+      chip.title = label;
+      chip.innerHTML = `<span class="chip-flag">${flag}</span><span class="chip-label">${label}</span>`;
       chip.addEventListener('click', ()=>{
         if(countrySel.value === v) return;
         countrySel.value = v;
@@ -1921,7 +1992,10 @@
 
     renderedCount = 0;
     rail.innerHTML = '';
-    rail.scrollLeft = 0; // always start from channel 1 on a fresh render — otherwise the browser can carry over the previous scroll position, landing mid-list instead
+    // No scroll-position reset needed here anymore — the channel list is
+    // a grid that flows naturally with the page (not its own scrolling
+    // strip with a position to reset), so a fresh render just naturally
+    // starts from channel 1 at the top of the grid.
     railCount.textContent = filtered.length ? `— ${filtered.length.toLocaleString()} found` : '';
 
     if(filtered.length === 0){
@@ -1997,6 +2071,11 @@
   // generous preload buffer so images are already there by the time they
   // become visible, without the buffer being so large that most of the
   // list stays loaded at once (which would defeat the point).
+  // root: null (the browser viewport) rather than the rail element —
+  // now that the channel grid flows naturally with the page instead of
+  // being its own horizontally-scrolling strip, the rail itself has no
+  // scroll/overflow of its own for IntersectionObserver to measure
+  // against; the viewport is the thing actually scrolling now.
   const imgObserver = new IntersectionObserver((entries)=>{
     for(const entry of entries){
       const img = entry.target;
@@ -2006,7 +2085,7 @@
         img.removeAttribute('src'); // keeps data-src so it reloads if scrolled back into range
       }
     }
-  }, {root: rail, rootMargin: '400px'});
+  }, {root: null, rootMargin: '600px 0px'});
 
   function renderMoreClean(){
     const start = renderedCount;
@@ -2032,9 +2111,14 @@
       s.className = 'sentinel';
       rail.appendChild(s);
       if(!sentinelObserver){
+        // root: null (viewport), rootMargin biased toward the bottom —
+        // same reasoning as imgObserver above: the grid scrolls with the
+        // page now, not as its own horizontal strip, so the viewport is
+        // what's actually scrolling and "approaching" means approaching
+        // from below, not from the right.
         sentinelObserver = new IntersectionObserver((entries)=>{
           entries.forEach(e=>{ if(e.isIntersecting) renderMore(); });
-        }, {root: rail, rootMargin: '0px 300px 0px 0px'});
+        }, {root: null, rootMargin: '0px 0px 600px 0px'});
       }
       sentinelObserver.observe(s);
     } else {
@@ -2066,106 +2150,17 @@
     nowPlayingLabel.textContent = playing ? playing.name : '';
   }
 
-  // ---------- Drag to scroll sideways ----------
-  let isDown = false, startX = 0, startScroll = 0;
-
-  // ---------- Dock hover magnify + edge auto-scroll (perf-optimized) ----------
-  // The naive version of this measured every rendered bubble on every
-  // mousemove event — with hundreds of channels in the dock, that's
-  // hundreds of forced layout reads per frame, a real source of visible
-  // lag while browsing. This version throttles to one update per animation
-  // frame and only measures the handful of bubbles actually within reach
-  // of the cursor, found via index math instead of scanning the whole dock.
-  const EDGE_ZONE = 110;   // px from either edge that triggers auto-scroll
-  const EDGE_SPEED = 24;   // max px per animation frame (was 6 — far too slow for long lists)
-  const ITEM_STRIDE = 98;  // .bubble width (78px) + .rail gap (20px)
-  const RAIL_PAD_LEFT = 64; // matches .rail's left padding
-  const INFLUENCE = 170;
-  let autoScrollSpeed = 0;
-  let pendingMouseX = null;
-  let rafQueued = false;
-  let magnifyActive = new Set();
-
-  function updateMagnify(mx){
-    const railRect = rail.getBoundingClientRect();
-    const contentX = mx - railRect.left + rail.scrollLeft - RAIL_PAD_LEFT;
-    const centerIdx = Math.round(contentX / ITEM_STRIDE);
-    const span = Math.ceil(INFLUENCE / ITEM_STRIDE) + 1;
-    const nextActive = new Set();
-
-    for(let i = centerIdx - span; i <= centerIdx + span; i++){
-      const el = rail.children[i];
-      if(!el || !el.classList || !el.classList.contains('bubble')) continue;
-      const r = el.getBoundingClientRect();
-      const cx = r.left + r.width/2;
-      const dist = Math.abs(mx - cx);
-      const influence = Math.max(0, 1 - dist/INFLUENCE);
-      if(influence > 0){
-        el.style.transform = `translateY(${-influence*8}px) scale(${1 + influence*0.32})`;
-        nextActive.add(i);
-      }
-    }
-    magnifyActive.forEach(i=>{
-      if(!nextActive.has(i)){
-        const el = rail.children[i];
-        if(el) el.style.transform = '';
-      }
-    });
-    magnifyActive = nextActive;
-
-    if(isDown){ autoScrollSpeed = 0; return; }
-    const distFromLeft = mx - railRect.left;
-    const distFromRight = railRect.right - mx;
-    if(distFromLeft < EDGE_ZONE){
-      autoScrollSpeed = -EDGE_SPEED * (1 - Math.max(distFromLeft, 0) / EDGE_ZONE);
-    } else if(distFromRight < EDGE_ZONE){
-      autoScrollSpeed = EDGE_SPEED * (1 - Math.max(distFromRight, 0) / EDGE_ZONE);
-    } else {
-      autoScrollSpeed = 0;
-    }
-  }
-
-  rail.addEventListener('mousemove', (e)=>{
-    pendingMouseX = e.clientX;
-    if(!rafQueued){
-      rafQueued = true;
-      requestAnimationFrame(()=>{
-        rafQueued = false;
-        if(pendingMouseX !== null) updateMagnify(pendingMouseX);
-      });
-    }
-  });
-  rail.addEventListener('mouseleave', ()=>{
-    magnifyActive.forEach(i=>{
-      const el = rail.children[i];
-      if(el) el.style.transform = '';
-    });
-    magnifyActive = new Set();
-    autoScrollSpeed = 0;
-    pendingMouseX = null;
-  });
-  (function autoScrollLoop(){
-    if(autoScrollSpeed !== 0 && !isDown) rail.scrollLeft += autoScrollSpeed;
-    requestAnimationFrame(autoScrollLoop);
-  })();
-
-  rail.addEventListener('mousedown', (e)=>{
-    isDown = true; rail.classList.add('dragging');
-    startX = e.pageX; startScroll = rail.scrollLeft;
-    autoScrollSpeed = 0;
-  });
-  window.addEventListener('mouseup', ()=>{ isDown=false; rail.classList.remove('dragging'); });
-  window.addEventListener('mousemove', (e)=>{
-    if(!isDown) return;
-    rail.scrollLeft = startScroll - (e.pageX - startX);
-  });
-  rail.addEventListener('wheel', (e)=>{
-    if(Math.abs(e.deltaY) > Math.abs(e.deltaX)){
-      rail.scrollLeft += e.deltaY;
-      e.preventDefault();
-    }
-  }, {passive:false});
-
+  // The old "drag to scroll sideways" + macOS-dock-style hover magnify +
+  // edge auto-scroll + wheel-to-horizontal-scroll block that used to live
+  // here is gone — all of it was specific to the channel list being a
+  // single horizontally-scrolling strip. Now that it's a grid that flows
+  // with the page, none of that interaction model applies; native
+  // vertical page scroll (and the infinite-scroll sentinel above) is all
+  // that's needed. Leaving the old wheel handler in particular would have
+  // been an active bug, not just dead code — it called preventDefault()
+  // on vertical wheel input to redirect it into horizontal scrolling,
+  // which would have silently blocked normal page scrolling while
+  // hovering over the channel grid.
 
   // ---------- Filters wiring ----------
   // Country / Category / Language are linked: they combine (AND) to narrow
@@ -4052,6 +4047,36 @@
   new ResizeObserver(scheduleSyncGuideHeight).observe(playerFrame);
   window.addEventListener('resize', scheduleSyncGuideHeight);
   syncGuideHeight();
+
+  // ---------- Mobile sticky header offsets ----------
+  // .wordmark, .country-chip-rail, and .player-frame all stick to the
+  // top of the viewport on mobile, stacked in that order (see the
+  // @media(max-width:640px) block above) — CSS position:sticky can't
+  // stack multiple elements automatically, each one's "top" offset is
+  // independent, not cumulative — so the real rendered heights are
+  // measured here and fed back in as CSS custom properties instead of
+  // guessing fixed pixel values that would drift out of sync the moment
+  // the header's actual content (font size, source-panel button, etc.)
+  // changes.
+  let stickyOffsetRaf = null;
+  function syncMobileStickyOffsets(){
+    if(window.innerWidth > 640) return;
+    const wordmarkH = wordmarkEl.getBoundingClientRect().height;
+    const chipRailH = countryChipRail.getBoundingClientRect().height;
+    document.documentElement.style.setProperty('--wordmark-h', `${wordmarkH}px`);
+    document.documentElement.style.setProperty('--header-total-h', `${wordmarkH + chipRailH}px`);
+  }
+  function scheduleSyncMobileStickyOffsets(){
+    if(stickyOffsetRaf !== null) return;
+    stickyOffsetRaf = requestAnimationFrame(()=>{
+      stickyOffsetRaf = null;
+      syncMobileStickyOffsets();
+    });
+  }
+  new ResizeObserver(scheduleSyncMobileStickyOffsets).observe(wordmarkEl);
+  new ResizeObserver(scheduleSyncMobileStickyOffsets).observe(countryChipRail);
+  window.addEventListener('resize', scheduleSyncMobileStickyOffsets);
+  syncMobileStickyOffsets();
 
   // ---------- Show/hide player controls ----------
   // Desktop: pure CSS :hover in the stylesheet above — controls are visible
