@@ -1326,6 +1326,105 @@
     const d = new Date(iso);
     return isNaN(d.getTime()) ? null : d;
   }
+  // ---------- Lightweight XMLTV parser (no DOMParser) ----------
+  // Deliberately does NOT use DOMParser. Building a full DOM tree from a
+  // large XMLTV feed is a real, confirmed source of a serious memory
+  // spike: a several-MB decompressed XML file can expand into 100-300MB+
+  // of live DOM structure (per-node overhead adds up fast at XMLTV's
+  // scale — a single country's feed can have tens of thousands of
+  // <programme> entries), and loadGuideForCountry fetches 2-3 of these
+  // IN PARALLEL, meaning multiple such DOM trees can be alive at the
+  // same peak moment. On mobile specifically, crossing the browser's
+  // per-tab memory budget doesn't throw a catchable error — the OS
+  // silently kills and reloads the tab, which is exactly what "the app
+  // reloads on its own while using the guide" looks like from the
+  // outside; there's nothing to catch because nothing actually threw.
+  //
+  // Scans the raw text directly instead, extracting <programme>/
+  // <channel> blocks by index (the same indexOf-boundary approach
+  // buildGroupMap/buildTvgIdMap already use for M3U — proven, and
+  // consistent with the rest of this codebase) rather than materializing
+  // any tree structure — peak memory stays roughly proportional to the
+  // decompressed text size, not some multiple of it. Real epgshare01/
+  // epg.pw feeds are machine-generated and highly regular, so a direct
+  // regex extraction on each block handles them reliably without needing
+  // full XML-spec generality (CDATA, namespaces, etc. that these feeds
+  // don't actually use).
+  function decodeXmlEntities(s){
+    if(!s || s.indexOf('&') === -1) return s;
+    return s.replace(/&(amp|lt|gt|quot|apos|#39|#x27);/g, (m, e)=>{
+      switch(e){
+        case 'amp': return '&';
+        case 'lt': return '<';
+        case 'gt': return '>';
+        case 'quot': return '"';
+        default: return "'"; // apos / #39 / #x27
+      }
+    });
+  }
+  async function parseXmltvText(xmlText){
+    const map = new Map();
+    const nameIndex = new Map();
+    const YIELD_EVERY = 400; // heavier per-iteration than a plain line scan, so yield more often to stay responsive
+
+    // ---- <programme channel="X" start="..." stop="..."> ----
+    let pos = 0, iter = 0;
+    while(true){
+      const start = xmlText.indexOf('<programme', pos);
+      if(start === -1) break;
+      const tagEnd = xmlText.indexOf('>', start);
+      const closeStart = tagEnd === -1 ? -1 : xmlText.indexOf('</programme>', tagEnd);
+      if(tagEnd === -1 || closeStart === -1) break; // truncated/malformed tail — stop rather than risk an infinite loop
+      const openTag = xmlText.slice(start, tagEnd + 1);
+      const body = xmlText.slice(tagEnd + 1, closeStart);
+      pos = closeStart + 12; // length of '</programme>'
+
+      iter++;
+      if(iter % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+
+      const chId = (openTag.match(/\bchannel="([^"]*)"/) || [])[1];
+      const startT = parseXmltvTime((openTag.match(/\bstart="([^"]*)"/) || [])[1]);
+      const stopT = parseXmltvTime((openTag.match(/\bstop="([^"]*)"/) || [])[1]);
+      if(!chId || !startT || !stopT || stopT <= startT) continue;
+
+      const titleMatch = body.match(/<title[^>]*>([\s\S]*?)<\/title>/);
+      const descMatch = body.match(/<desc[^>]*>([\s\S]*?)<\/desc>/);
+      const title = titleMatch ? decodeXmlEntities(titleMatch[1].trim()) : 'Untitled';
+      const desc = descMatch ? decodeXmlEntities(descMatch[1].trim()) : '';
+
+      if(!map.has(chId)) map.set(chId, []);
+      map.get(chId).push({title, desc, start: startT, stop: stopT});
+    }
+    map.forEach(list => list.sort((a,b)=> a.start - b.start));
+
+    // ---- <channel id="X"><display-name>...</display-name></channel> ----
+    pos = 0; iter = 0;
+    while(true){
+      const start = xmlText.indexOf('<channel', pos);
+      if(start === -1) break;
+      const tagEnd = xmlText.indexOf('>', start);
+      const closeStart = tagEnd === -1 ? -1 : xmlText.indexOf('</channel>', tagEnd);
+      if(tagEnd === -1 || closeStart === -1) break;
+      const openTag = xmlText.slice(start, tagEnd + 1);
+      const body = xmlText.slice(tagEnd + 1, closeStart);
+      pos = closeStart + 10; // length of '</channel>'
+
+      iter++;
+      if(iter % YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
+
+      const id = (openTag.match(/\bid="([^"]*)"/) || [])[1];
+      if(!id) continue;
+      const dnRe = /<display-name[^>]*>([\s\S]*?)<\/display-name>/g;
+      let m;
+      while((m = dnRe.exec(body))){
+        const norm = normalizeName(decodeXmlEntities(m[1]));
+        if(norm && !nameIndex.has(norm)) nameIndex.set(norm, id);
+      }
+    }
+
+    return {map, nameIndex};
+  }
+
   function countryCodeFor(ch){
     // Checked FIRST, ahead of the channel's own tvg-id — confirmed
     // reason: aggregator sources built from many different upstream
@@ -1427,40 +1526,19 @@
   // channelId -> sorted programme[] map and a normalizedName -> channelId
   // index (from each <channel><display-name>). Cached per URL so a shared
   // feed like the epg.pw global file is only ever downloaded once per session.
+  const XMLTV_CACHE_MAX = 6; // decompressed+parsed XMLTV results, bounded for the same memory reason GUIDE_CACHE_MAX exists — see parseXmltvText above
   function fetchXmltvMap(url){
     if(xmltvCache.has(url)) return xmltvCache.get(url);
+    if(xmltvCache.size >= XMLTV_CACHE_MAX){
+      const oldest = xmltvCache.keys().next().value; // Map preserves insertion order — first key is the least-recently-added
+      xmltvCache.delete(oldest);
+    }
     const promise = (async ()=>{
       try{
         const buf = await fetchRawBytes(url);
         if(!buf) throw new Error('no data retrieved');
         const xmlText = isGzip(buf) ? pako.inflate(buf, {to:'string'}) : new TextDecoder('utf-8').decode(buf);
-        const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-        if(doc.querySelector('parsererror')) throw new Error('xml did not parse');
-
-        const map = new Map();
-        doc.querySelectorAll('programme').forEach(p=>{
-          const chId = p.getAttribute('channel');
-          const start = parseXmltvTime(p.getAttribute('start'));
-          const stop = parseXmltvTime(p.getAttribute('stop'));
-          if(!chId || !start || !stop || stop <= start) return;
-          const title = p.querySelector('title')?.textContent?.trim() || 'Untitled';
-          const desc = p.querySelector('desc')?.textContent?.trim() || '';
-          if(!map.has(chId)) map.set(chId, []);
-          map.get(chId).push({title, desc, start, stop});
-        });
-        map.forEach(list => list.sort((a,b)=> a.start - b.start));
-
-        const nameIndex = new Map();
-        doc.querySelectorAll('channel').forEach(c=>{
-          const id = c.getAttribute('id');
-          if(!id) return;
-          c.querySelectorAll('display-name').forEach(dn=>{
-            const norm = normalizeName(dn.textContent);
-            if(norm && !nameIndex.has(norm)) nameIndex.set(norm, id);
-          });
-        });
-
-        return {map, nameIndex};
+        return await parseXmltvText(xmlText);
       }catch(e){
         console.warn('guide fetch failed for', url, e);
         return null;
@@ -1591,15 +1669,17 @@
     guidePanel.innerHTML = html;
   }
 
-  // showGuideFor is the expensive part (fetch + gzip decompress + full
-  // DOMParser XML parse of a whole country's XMLTV feed — multiple MB of
-  // DOM for a single guide lookup). It used to run on EVERY channel
-  // switch unconditionally, even when the "TV Guide" toggle was off and
-  // nothing would even display it — meaning that heavy parse was the real
-  // cost hitting right around ~5s into playback on mobile (staggered by
-  // 400ms below, then several more seconds to fetch/decompress/parse),
-  // independent of which video-playback path (hls.js vs mpegts.js) was in
-  // use. Gating it on the toggle means it only ever runs when the panel
+  // showGuideFor is the expensive part (fetch + gzip decompress + parse a
+  // whole country's XMLTV feed — potentially tens of thousands of
+  // <programme> entries for a single guide lookup, even with the
+  // DOMParser-free streaming parser above). It used to run on EVERY
+  // channel switch unconditionally, even when the "TV Guide" toggle was
+  // off and nothing would even display it — meaning that heavy parse was
+  // the real cost hitting right around ~5s into playback on mobile
+  // (staggered by 400ms below, then several more seconds to fetch/
+  // decompress/parse), independent of which video-playback path (hls.js
+  // vs mpegts.js) was in use. Gating it on the toggle means it only ever
+  // runs when the panel
   // is actually going to show something.
   function maybeShowGuide(ch){
     guideChannel = ch;
@@ -3823,9 +3903,9 @@
 
     showControls();
     // The guide fetch is a separate, genuinely heavy cost of its own —
-    // fetching a gzipped XMLTV file, decompressing it, and parsing it as
-    // XML (DOMParser is notably memory-hungry relative to the raw text
-    // size). Firing it in the exact same instant hls.js is standing up
+    // fetching a gzipped XMLTV file, decompressing it, and parsing
+    // potentially tens of thousands of programme entries out of it.
+    // Firing it in the exact same instant hls.js is standing up
     // MediaSource and starting to buffer is stacking two unrelated heavy
     // operations on top of each other right when a phone can least
     // afford it. A short stagger on mobile lets playback startup get a
