@@ -1806,7 +1806,7 @@
     favChip.type = 'button';
     favChip.className = 'country-chip chip-fav' + (favoritesOnly ? ' is-selected' : '');
     favChip.title = 'Favorites';
-    favChip.innerHTML = `<span class="chip-flag">♥</span><span class="chip-label">Fav</span><span class="chip-count">${favoriteIds.size}</span>`;
+    favChip.innerHTML = `<span class="chip-flag">♥</span><span class="chip-label">Fav</span><span class="chip-count">${favoriteChannels.size}</span>`;
     favChip.addEventListener('click', ()=>{
       favoritesOnly = !favoritesOnly;
       applyFilters();
@@ -2059,26 +2059,75 @@
   // absent (some custom/CSV sources never set tvg-id at all) — imperfect
   // (two same-named channels from different sources would collide) but
   // far better than losing every favorite on the next reload.
-  const FAVORITES_STORAGE_KEY = 'livetv_favorites_v1';
-  let favoriteIds = new Set();
+  //
+  // Stores a full playable SNAPSHOT of the channel (url, logo, tvgId,
+  // name — everything playChannel actually needs), not just a bare key —
+  // that's the actual fix for "favorites should work regardless of which
+  // source is currently loaded". A key-only design (the original version
+  // of this) could only ever mark favorite/not-favorite against whatever
+  // happened to be in allChannels right now — switch to a different
+  // source's playlist and every favorite from the old one became
+  // invisible and unplayable, since there was no channel object left
+  // anywhere to represent it. With a stored snapshot, the Fav chip can
+  // reconstruct a fully playable channel list straight from favorites
+  // storage itself, independent of whatever source is currently active.
+  const FAVORITES_STORAGE_KEY = 'livetv_favorites_v2';
+  let favoriteChannels = new Map(); // key (see favoriteKeyFor) -> channel snapshot
   try{
     const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
-    if(raw) favoriteIds = new Set(JSON.parse(raw));
+    if(raw) favoriteChannels = new Map(Object.entries(JSON.parse(raw)));
   }catch(e){ /* corrupt/unavailable storage — starts empty, still functional */ }
   function favoriteKeyFor(ch){ return ch.tvgId || `name:${normalizeName(ch.name)}`; }
-  function isFavorite(ch){ return favoriteIds.has(favoriteKeyFor(ch)); }
+  function isFavorite(ch){ return favoriteChannels.has(favoriteKeyFor(ch)); }
   function saveFavorites(){
-    try{ localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Array.from(favoriteIds))); }catch(e){}
+    try{ localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Object.fromEntries(favoriteChannels))); }catch(e){}
   }
   function toggleFavorite(ch){
     const key = favoriteKeyFor(ch);
-    if(favoriteIds.has(key)) favoriteIds.delete(key); else favoriteIds.add(key);
+    if(favoriteChannels.has(key)){
+      favoriteChannels.delete(key);
+    } else {
+      // A plain snapshot, not a live reference to `ch` — deliberately
+      // excludes session-only fields (checked/checkReason, the numeric
+      // `id` used to track "currently playing" within one loaded
+      // source) that wouldn't mean anything, or could even collide with
+      // an unrelated channel's id, once restored from storage in a
+      // totally different session/source. A fresh, source-independent
+      // id (fav:<key>) is assigned when it's actually rendered — see
+      // buildFavoriteChannelList below.
+      favoriteChannels.set(key, {
+        name: ch.name, url: ch.url, logo: ch.logo || '', tvgId: ch.tvgId || '',
+        country: ch.country || '', category: ch.category || '', language: ch.language || ''
+      });
+    }
     saveFavorites();
     updateFavoritesChipCount();
   }
   function updateFavoritesChipCount(){
     const chip = document.querySelector('.chip-fav .chip-count');
-    if(chip) chip.textContent = String(favoriteIds.size);
+    if(chip) chip.textContent = String(favoriteChannels.size);
+  }
+  // Turns stored snapshots into fully-fledged channel objects the rest
+  // of the app already knows how to play/render — same shape as what
+  // parseM3U produces, with a namespaced string id (never collides with
+  // a same-session numeric id from whatever source happens to be
+  // currently loaded).
+  function buildFavoriteChannelList(){
+    return Array.from(favoriteChannels.entries()).map(([key, snap])=>({
+      id: `fav:${key}`, name: snap.name, url: snap.url, logo: snap.logo,
+      tvgId: snap.tvgId, country: snap.country, category: snap.category, language: snap.language,
+      checked: null, checkReason: ''
+    }));
+  }
+  // The "now playing" lookup (markActiveBubble) searches allChannels by
+  // id — which won't find a channel currently playing FROM favorites
+  // while a different source is loaded (it was never part of
+  // allChannels in the first place). This is the fallback for that case.
+  function findPlayingFavoriteById(id){
+    if(typeof id !== 'string' || !id.startsWith('fav:')) return null;
+    const key = id.slice(4);
+    const snap = favoriteChannels.get(key);
+    return snap ? {id, name: snap.name, url: snap.url, logo: snap.logo, tvgId: snap.tvgId} : null;
   }
   let favoritesOnly = false;
 
@@ -2089,21 +2138,35 @@
     const q = searchInput.value.trim().toLowerCase();
     const workingOnly = workingOnlyToggle.checked;
 
-    filtered = allChannels.filter(c=>{
-      if(favoritesOnly && !isFavorite(c)) return false;
-      if(!fieldMatchesFilter(c.country, country)) return false;
-      if(!fieldMatchesFilter(c.category, category)) return false;
-      if(!fieldMatchesFilter(c.language, language)) return false;
-      // Checks tvg-id too, not just the display name. A channel's on-air
-      // branding can get renamed (e.g. the 2024-2025 Diamond Sports
-      // rebrand of most regional Fox Sports Networks to "FanDuel Sports
-      // Network") while its tvg-id keeps the original identity
-      // ("FoxSports1.us" style) — searching only the display name misses
-      // exactly these renamed-but-not-fully-scrubbed channels.
-      if(q && !c.name.toLowerCase().includes(q) && !(c.tvgId && c.tvgId.toLowerCase().includes(q))) return false;
-      if(workingOnly && c.checked !== 'ok') return false;
-      return true;
-    });
+    if(favoritesOnly){
+      // Deliberately NOT combined with country/category/language here —
+      // those describe the CURRENTLY loaded source's channels, and a
+      // favorite saved from a different source has no meaningful
+      // relationship to them. Search still applies (still useful to
+      // narrow down a long favorites list), and "Only working" still
+      // applies too (checked/checkReason gets set the same way once a
+      // favorite-list channel is health-checked or played).
+      filtered = buildFavoriteChannelList().filter(c=>{
+        if(q && !c.name.toLowerCase().includes(q) && !(c.tvgId && c.tvgId.toLowerCase().includes(q))) return false;
+        if(workingOnly && c.checked !== 'ok') return false;
+        return true;
+      });
+    } else {
+      filtered = allChannels.filter(c=>{
+        if(!fieldMatchesFilter(c.country, country)) return false;
+        if(!fieldMatchesFilter(c.category, category)) return false;
+        if(!fieldMatchesFilter(c.language, language)) return false;
+        // Checks tvg-id too, not just the display name. A channel's on-air
+        // branding can get renamed (e.g. the 2024-2025 Diamond Sports
+        // rebrand of most regional Fox Sports Networks to "FanDuel Sports
+        // Network") while its tvg-id keeps the original identity
+        // ("FoxSports1.us" style) — searching only the display name misses
+        // exactly these renamed-but-not-fully-scrubbed channels.
+        if(q && !c.name.toLowerCase().includes(q) && !(c.tvgId && c.tvgId.toLowerCase().includes(q))) return false;
+        if(workingOnly && c.checked !== 'ok') return false;
+        return true;
+      });
+    }
 
     
     // activeIndex is just a position in `filtered` — rebuilding that array
@@ -2258,9 +2321,13 @@
     // Looked up from allChannels (never filtered) rather than
     // filtered[activeIndex] — the bar should always reflect what's
     // actually playing, even if the current filters happen to hide that
-    // channel from the visible rail right now.
+    // channel from the visible rail right now. Falls back to favorites
+    // storage when not found — a channel playing from favorites while a
+    // DIFFERENT source is currently loaded was never part of allChannels
+    // in the first place, so this is the only place left it can still
+    // be found.
     const playing = activePlayingChannelId != null
-      ? allChannels.find(c => c.id === activePlayingChannelId)
+      ? (allChannels.find(c => c.id === activePlayingChannelId) || findPlayingFavoriteById(activePlayingChannelId))
       : null;
     updateNowPlayingBar(playing);
   }
@@ -4108,7 +4175,12 @@
     const ctx = getCastContext();
     if(!ctx) return false;
 
-    const ch = activePlayingChannelId != null ? allChannels.find(c => c.id === activePlayingChannelId) : null;
+    // Same allChannels-then-favorites fallback as markActiveBubble above
+    // — casting a channel currently playing from favorites while a
+    // different source is loaded needs the same lookup.
+    const ch = activePlayingChannelId != null
+      ? (allChannels.find(c => c.id === activePlayingChannelId) || findPlayingFavoriteById(activePlayingChannelId))
+      : null;
     if(!ch){
       showToast('Pick a channel first, then cast it.');
       return true; // handled — don't fall through to other cast methods
