@@ -223,6 +223,25 @@
      2-item row instead. */
   .filter-row .lang-field{flex:0 0 calc(50% - 5px);}
 
+  /* ---------- Now Playing bar ---------- */
+  .now-playing-bar{
+    display:flex;align-items:center;gap:10px;
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:12px;
+    padding:8px 12px 8px 8px;
+  }
+  .np-logo{
+    flex:none;width:34px;height:34px;border-radius:8px;background:var(--bg-bubble);
+    border:1px solid var(--border-soft);display:flex;align-items:center;justify-content:center;
+    overflow:hidden;
+  }
+  .np-logo img{width:78%;height:78%;object-fit:contain;}
+  .np-logo-fallback{font-size:9.5px;font-weight:700;color:var(--text-faint);text-transform:uppercase;letter-spacing:.3px;}
+  .np-name{
+    flex:1;min-width:0;font-size:13.5px;font-weight:600;color:var(--text-dim);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .now-playing-bar.has-channel .np-name{color:var(--text);}
+
   .field{position:relative;}
   .field select, .field input{
     width:100%;appearance:none;-webkit-appearance:none;
@@ -914,14 +933,24 @@
     </div>
 
     <div class="side-col">
+      <div class="now-playing-bar" id="nowPlayingBar">
+        <div class="np-logo" id="npLogo">
+          <span class="np-logo-fallback" id="npLogoFallback">Logo</span>
+        </div>
+        <div class="np-name" id="npNameBar">Now playing Channel Name</div>
+      </div>
+
       <div class="field search">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4.3-4.3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         <input id="searchInput" type="text" placeholder="Search channel">
       </div>
 
       <div class="filter-row">
-        <div class="field select">
+        <div class="field select" style="display:none;">
           <select id="countrySel"><option value="">Country</option></select>
+        </div>
+        <div class="field select lang-field">
+          <select id="languageSel"><option value="">Language</option></select>
         </div>
         <div class="field select">
           <select id="categorySel"><option value="">Category</option></select>
@@ -929,9 +958,6 @@
       </div>
 
       <div class="filter-row">
-        <div class="field select lang-field">
-          <select id="languageSel"><option value="">Language</option></select>
-        </div>
         <button class="reset-btn" id="resetFiltersBtn" title="Reset Country / Category / Language / Search">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 2.64 6.36"/><path d="M3 21v-6h6"/></svg>
         </button>
@@ -1091,6 +1117,9 @@
   const guideToggle = el('guideToggle');
   const guideInner = el('guideInner');
   const logoDisplay = el('logoDisplay');
+  const nowPlayingBar = el('nowPlayingBar');
+  const npLogo = el('npLogo');
+  const npNameBar = el('npNameBar');
   const video = el('video');
   const playerFrame = el('playerFrame');
   const emptyState = el('emptyState');
@@ -2148,6 +2177,20 @@
       ? allChannels.find(c => c.id === activePlayingChannelId)
       : null;
     nowPlayingLabel.textContent = playing ? playing.name : '';
+    updateNowPlayingBar(playing);
+  }
+
+  // The dedicated "Logo | Now playing Channel Name" bar above the search
+  // field — separate from nowPlayingLabel (the small text next to the
+  // "Live TV" title), which stays as-is for the header.
+  function updateNowPlayingBar(ch){
+    npNameBar.textContent = ch ? ch.name : 'Now playing Channel Name';
+    nowPlayingBar.classList.toggle('has-channel', !!ch);
+    if(ch && ch.logo){
+      npLogo.innerHTML = `<img src="${ch.logo}" referrerpolicy="no-referrer" onerror="this.parentElement.innerHTML='<span class=&quot;np-logo-fallback&quot;>${(ch.name||'').replace(/[^A-Za-z0-9]/g,'').slice(0,2).toUpperCase() || '?'}</span>'">`;
+    } else {
+      npLogo.innerHTML = '<span class="np-logo-fallback">Logo</span>';
+    }
   }
 
   // The old "drag to scroll sideways" + macOS-dock-style hover magnify +
