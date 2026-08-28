@@ -58,6 +58,7 @@
   };
 </script>
 <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js" defer></script>
+<script src="https://accounts.google.com/gsi/client" defer></script>
 <script type="module">
   // ---------- HEVC/H.265 client-side fallback decoder ----------
   // Some IPTV sources (South Asian providers especially) encode "HD"
@@ -981,6 +982,12 @@
 
             <div class="settings-divider"></div>
             <button type="button" class="settings-action-btn" id="copyLinkBtn">Copy stream link</button>
+
+            <div class="settings-divider" id="driveSyncDivider" style="display:none;"></div>
+            <div class="settings-row-item" id="driveSyncRow" style="display:none;">
+              <span class="settings-row-label">Sync favorites<span class="settings-row-sub" id="driveSyncStatus">Not signed in</span></span>
+              <button type="button" class="settings-action-btn" id="driveSyncBtn" style="width:auto;padding:6px 12px;">Sign in</button>
+            </div>
           </div>
         </div>
         <div class="right-controls">
@@ -1140,6 +1147,15 @@
   // rather run one relay instead of two. Leave blank if not set up.
   //   MY_FFMPEG_RELAY_URL = 'https://your-ffmpeg-relay-tunnel.example.com';
   const MY_FFMPEG_RELAY_URL = '';
+  // Optional: syncs favorites across devices via Google Drive's
+  // "appDataFolder" — a hidden per-app storage area invisible in the
+  // person's normal Drive UI, accessible only to this app specifically.
+  // Requires a Google Cloud OAuth Client ID of your own (this can't be
+  // pre-configured any more than MY_PROXY_URL can — it's tied to a
+  // specific Google Cloud project only the deployer can create). The
+  // sync UI in Settings stays hidden entirely until this is set.
+  //   MY_GOOGLE_CLIENT_ID = '123456789-abc...apps.googleusercontent.com';
+  const MY_GOOGLE_CLIENT_ID = '';
   // MY_PROXY_URL's origin isn't known until this line runs, so its
   // preconnect hint (unlike cdnjs/jsdelivr/etc above) has to be added
   // here rather than as a static <link> — it's the single most-used
@@ -2292,6 +2308,7 @@
   function isFavorite(ch){ return favoriteChannels.has(favoriteKeyFor(ch)); }
   function saveFavorites(){
     try{ localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Object.fromEntries(favoriteChannels))); }catch(e){}
+    scheduleDrivePush(); // no-op until signed in — see the Drive sync module below
   }
   function toggleFavorite(ch){
     const key = favoriteKeyFor(ch);
@@ -2317,6 +2334,174 @@
   function updateFavoritesChipCount(){
     const chip = document.querySelector('.chip-fav .chip-count');
     if(chip) chip.textContent = String(favoriteChannels.size);
+  }
+
+  // ---------- Favorites sync via Google Drive (optional) ----------
+  // Uses Google Identity Services for OAuth (the modern token-client
+  // flow — no separate backend needed, this is a fully client-side OAuth
+  // pattern Google explicitly supports for static/SPA apps) and the
+  // Drive REST API's dedicated appDataFolder — a hidden storage area
+  // that never shows up in the person's actual Drive UI and can only
+  // ever be read/written by this app, specifically meant for exactly
+  // this "sync small app settings across devices" case rather than
+  // requesting broad access to someone's real files.
+  //
+  // Entirely inert (every function below no-ops immediately) unless
+  // MY_GOOGLE_CLIENT_ID is actually set — same pattern as MY_PROXY_URL/
+  // MY_HOME_RELAY_URL/MY_FFMPEG_RELAY_URL elsewhere in this file.
+  const DRIVE_APPDATA_FILENAME = 'ltv_favorites.json';
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+  let driveAccessToken = null;
+  let driveTokenClient = null;
+  let driveFileId = null;      // cached once known, so repeat syncs don't re-search every time
+  let driveSyncing = false;
+  let drivePushTimer = null;
+
+  function driveSyncBtnEl(){ return document.getElementById('driveSyncBtn'); }
+  function driveSyncStatusEl(){ return document.getElementById('driveSyncStatus'); }
+
+  function initGoogleDriveSync(){
+    if(!MY_GOOGLE_CLIENT_ID) return; // feature not configured — stays fully hidden, see the HTML default (display:none)
+    if(!window.google || !google.accounts || !google.accounts.oauth2){
+      // Google Identity Services script may not have finished loading
+      // yet (it's `defer`red like everything else) — retry shortly
+      // rather than giving up on the very first check.
+      setTimeout(initGoogleDriveSync, 300);
+      return;
+    }
+    document.getElementById('driveSyncDivider').style.display = '';
+    document.getElementById('driveSyncRow').style.display = '';
+    driveTokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: MY_GOOGLE_CLIENT_ID,
+      scope: DRIVE_SCOPE,
+      callback: async (resp)=>{
+        if(resp.error){ showToast('Google sign-in failed or was cancelled.'); return; }
+        driveAccessToken = resp.access_token;
+        setDriveSyncStatus('Syncing…');
+        await syncFavoritesWithDrive();
+      }
+    });
+    driveSyncBtnEl().addEventListener('click', ()=>{
+      if(driveAccessToken){
+        // "Sign out" here just drops the in-memory token — it does NOT
+        // revoke the app's Drive access grant itself (that's managed
+        // from the person's own Google Account permissions page, same
+        // as any other app they've connected). Simpler and less
+        // surprising than silently revoking access they might still
+        // want for next time.
+        driveAccessToken = null;
+        driveFileId = null;
+        setDriveSyncStatus('Not signed in');
+        driveSyncBtnEl().textContent = 'Sign in';
+        showToast('Signed out of Google Drive sync (local favorites are untouched).');
+        return;
+      }
+      driveTokenClient.requestAccessToken({prompt: driveAccessToken ? '' : 'consent'});
+    });
+  }
+
+  function setDriveSyncStatus(text){
+    const el = driveSyncStatusEl();
+    if(el) el.textContent = text;
+    if(driveSyncBtnEl()) driveSyncBtnEl().textContent = driveAccessToken ? 'Sign out' : 'Sign in';
+  }
+
+  async function driveApiFetch(url, options){
+    const res = await fetch(url, {
+      ...options,
+      headers: {...(options && options.headers ? options.headers : {}), Authorization: `Bearer ${driveAccessToken}`}
+    });
+    if(res.status === 401){
+      // Token expired/revoked mid-session — drop it and let the person
+      // re-click Sign in rather than silently failing forever.
+      driveAccessToken = null;
+      setDriveSyncStatus('Session expired — sign in again');
+      throw new Error('Drive session expired');
+    }
+    return res;
+  }
+
+  async function findDriveFavoritesFileId(){
+    if(driveFileId) return driveFileId;
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${encodeURIComponent(`name='${DRIVE_APPDATA_FILENAME}'`)}&fields=files(id)`);
+    const data = await res.json();
+    driveFileId = (data.files && data.files[0]) ? data.files[0].id : null;
+    return driveFileId;
+  }
+
+  async function pullFavoritesFromDrive(){
+    const fileId = await findDriveFavoritesFileId();
+    if(!fileId) return null; // nothing synced from any device yet — not an error
+    const res = await driveApiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+    if(!res.ok) return null;
+    try{ return await res.json(); }catch(e){ return null; }
+  }
+
+  async function pushFavoritesToDrive(){
+    if(!driveAccessToken) return;
+    const fileId = await findDriveFavoritesFileId();
+    const boundary = 'ltvfavboundary';
+    const metadata = fileId ? {} : {name: DRIVE_APPDATA_FILENAME, parents: ['appDataFolder']};
+    const body = JSON.stringify(Object.fromEntries(favoriteChannels));
+    const multipart =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--`;
+    const url = fileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+      : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
+    const res = await driveApiFetch(url, {
+      method: fileId ? 'PATCH' : 'POST',
+      headers: {'Content-Type': `multipart/related; boundary=${boundary}`},
+      body: multipart
+    });
+    if(!fileId && res.ok){ const created = await res.json(); driveFileId = created.id; }
+  }
+
+  // Full two-way sync: pull whatever's currently on Drive, MERGE it with
+  // whatever's local (a plain union — Drive's copy wins on any key that
+  // exists in both, on the theory that a sync coming FROM another device
+  // reflects a more recent action there than "whatever this device
+  // happened to have cached locally"; there's no real per-entry
+  // timestamp to do proper conflict resolution with), save the merged
+  // result locally, then push that same merged result back up so both
+  // sides end up consistent with each other rather than just picking one
+  // side and discarding the other's changes.
+  async function syncFavoritesWithDrive(){
+    if(driveSyncing || !driveAccessToken) return;
+    driveSyncing = true;
+    try{
+      const remote = await pullFavoritesFromDrive();
+      if(remote){
+        Object.entries(remote).forEach(([key, snap])=>{ favoriteChannels.set(key, snap); });
+        try{ localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Object.fromEntries(favoriteChannels))); }catch(e){}
+        updateFavoritesChipCount();
+        if(favoritesOnly) applyFilters();
+      }
+      await pushFavoritesToDrive();
+      setDriveSyncStatus(`Synced just now (${favoriteChannels.size} favorites)`);
+    }catch(e){
+      console.warn('Drive favorites sync failed:', e);
+      if(driveAccessToken) setDriveSyncStatus('Sync failed — will retry on next change');
+    } finally {
+      driveSyncing = false;
+    }
+  }
+
+  // Debounced push for ordinary favorite/unfavorite actions during an
+  // already-signed-in session — batches rapid-fire toggles (favoriting
+  // several channels in a row) into one upload instead of one per click,
+  // and is a genuine no-op whenever nobody's signed in, so every regular
+  // localStorage save (see saveFavorites above) can call this
+  // unconditionally without needing to check sign-in state itself first.
+  function scheduleDrivePush(){
+    if(!driveAccessToken) return;
+    clearTimeout(drivePushTimer);
+    drivePushTimer = setTimeout(async ()=>{
+      try{
+        await pushFavoritesToDrive();
+        setDriveSyncStatus(`Synced just now (${favoriteChannels.size} favorites)`);
+      }catch(e){ console.warn('Drive favorites push failed:', e); }
+    }, 1500);
   }
   // Turns stored snapshots into fully-fledged channel objects the rest
   // of the app already knows how to play/render — same shape as what
@@ -4839,6 +5024,8 @@
     await loadSourceList();
     loadSavedSourceOrDefault();
   })();
+
+  initGoogleDriveSync(); // no-op unless MY_GOOGLE_CLIENT_ID is actually set
 })();
 </script>
 </body>
