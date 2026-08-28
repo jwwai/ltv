@@ -4300,14 +4300,49 @@
   const AUDIO_FX_WIDTH = 1.3; // stereo widening factor — tasteful, not a gimmicky wall-of-phase effect
   let audioFxEnabled = localStorage.getItem(AUDIO_FX_STORAGE_KEY) !== 'off'; // on by default
   let audioFxGraph = null; // built lazily; null until the first real interaction
+  // Set once, if the elaborate part of the graph (mid/side widening etc.)
+  // ever fails to build on this browser — see buildAudioFxGraph's inner
+  // catch block. Prevents every later toggle click / channel switch from
+  // repeating the same failing attempt: each attempt creates a fresh
+  // AudioContext before it even gets to the part that fails, and some
+  // browsers cap how many can exist at once — retrying forever risked
+  // eventually hitting THAT limit too, on top of just being pointless
+  // once we already know the answer.
+  let audioFxUnavailable = false;
 
   function buildAudioFxGraph(){
     if(audioFxGraph) return audioFxGraph;
+    if(audioFxUnavailable) return null; // already confirmed this browser can't build it — the fallback direct connection from that first attempt is still playing audio fine; don't repeat a doomed attempt
     if(!(window.AudioContext || window.webkitAudioContext)) return null;
+    let ctx, source;
     try{
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = ctx.createMediaElementSource(video);
-
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      source = ctx.createMediaElementSource(video);
+    }catch(e){
+      // This specific call is the one genuinely safe place to bail out —
+      // if IT throws, the video's native audio path was never touched at
+      // all, so nothing is broken.
+      console.warn('Audio enhancement unavailable (could not attach to the video element):', e);
+      return null;
+    }
+    // From here on, `source` exists — which means the video element's
+    // native/direct audio output is now PERMANENTLY gone, irreversibly,
+    // for the rest of its lifetime (the Web Audio spec allows exactly
+    // one MediaElementAudioSourceNode per media element, ever; a second
+    // createMediaElementSource() call on the same element always throws).
+    // That makes everything from here a genuinely different risk than
+    // the block above: if ANY of the many node-creation/connect() calls
+    // below throws — confirmed as a real failure mode, not hypothetical,
+    // on some browser/hardware combinations — the OLD code just abandoned
+    // `source` unconnected and returned null, leaving the video
+    // permanently silent with zero recovery path short of a full page
+    // reload (every later attempt to rebuild would immediately re-throw
+    // on the createMediaElementSource call above, forever). This wraps
+    // the elaborate part separately and, on any failure, falls all the
+    // way back to connecting `source` directly to ctx.destination —
+    // guaranteeing plain audio keeps working even when the enhancement
+    // itself can't be built here, instead of losing audio entirely.
+    try{
       // Gentle low-shelf warmth — fuller low end without turning into a
       // boomy "bass boost" gimmick.
       const bass = ctx.createBiquadFilter();
@@ -4380,7 +4415,20 @@
       applyAudioFxState();
       return audioFxGraph;
     }catch(e){
-      console.warn('Audio enhancement unavailable:', e);
+      console.warn('Audio enhancement graph failed to build — falling back to plain audio so playback keeps working:', e);
+      try{ source.disconnect(); }catch(e2){}
+      try{
+        source.connect(ctx.destination);
+        // Recorded so isFavorite-style callers/future toggle clicks know
+        // there's a working (if unenhanced) source already attached —
+        // audioFxGraph itself deliberately stays null (the wet/dry gain
+        // nodes this relies on were never built), which naturally makes
+        // the toggle a no-op rather than trying, and failing the same
+        // way again, on every subsequent click.
+        audioFxUnavailable = true;
+      }catch(e2){
+        console.warn('Audio enhancement fallback also failed — audio may be silent:', e2);
+      }
       return null;
     }
   }
@@ -4404,6 +4452,15 @@
     const graph = buildAudioFxGraph();
     if(graph && graph.ctx.state === 'suspended') graph.ctx.resume();
     applyAudioFxState();
+    if(!graph && audioFxUnavailable && audioFxEnabled){
+      // Tell them plainly rather than leaving the toggle looking "on"
+      // with nothing actually happening — audio itself is still playing
+      // fine (the fallback direct connection), just not enhanced.
+      showToast("Enhanced audio isn't available in this browser — regular audio keeps playing normally.");
+      audioFxToggle.checked = false;
+      audioFxEnabled = false;
+      localStorage.setItem(AUDIO_FX_STORAGE_KEY, 'off');
+    }
   });
   // Defensive backstop beyond the two explicit resume() calls above —
   // autoplay/audio-gesture policy is notoriously inconsistent across
